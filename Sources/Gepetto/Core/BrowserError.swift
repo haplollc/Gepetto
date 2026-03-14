@@ -1,6 +1,6 @@
 //
 //  BrowserError.swift
-//  BrowserKit
+//  Gepetto
 //
 //  Error types for browser automation.
 //

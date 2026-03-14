@@ -1,6 +1,6 @@
 //
 //  BrowserSheet.swift
-//  BrowserKit
+//  Gepetto
 //
 //  Presentable sheet for browser automation.
 //

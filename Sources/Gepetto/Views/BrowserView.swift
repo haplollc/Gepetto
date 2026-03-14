@@ -1,6 +1,6 @@
 //
 //  BrowserView.swift
-//  BrowserKit
+//  Gepetto
 //
 //  SwiftUI view that displays and controls the browser.
 //

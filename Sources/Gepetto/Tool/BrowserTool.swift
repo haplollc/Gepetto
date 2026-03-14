@@ -1,6 +1,6 @@
 //
 //  BrowserTool.swift
-//  BrowserKit
+//  Gepetto
 //
 //  Tool definition for LLM function calling.
 //  Provides JSON schema for AI agents to control the browser.

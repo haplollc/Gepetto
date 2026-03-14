@@ -1,10 +1,10 @@
 //
 //  BrowserErrorTests.swift
-//  BrowserKitTests
+//  GepettoTests
 //
 
 import XCTest
-@testable import BrowserKit
+@testable import Gepetto
 
 final class BrowserErrorTests: XCTestCase {
     

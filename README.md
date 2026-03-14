@@ -4,16 +4,20 @@
   <img src="https://img.shields.io/badge/License-MIT-green" alt="License">
 </p>
 
-<h1 align="center">🌐 BrowserKit</h1>
+<h1 align="center">🎭 Gepetto</h1>
 
 <p align="center">
-  <strong>iOS & macOS browser automation for AI agents</strong><br>
+  <strong>The puppet master for browser automation</strong><br>
+  <em>Control the web like strings on a marionette</em>
+</p>
+
+<p align="center">
   Navigate • Extract • Interact • Screenshot
 </p>
 
 ---
 
-BrowserKit provides **programmatic control** over a WKWebView-based browser, enabling AI agents to browse the web, fill forms, click elements, take screenshots, and extract content — all from Swift.
+Gepetto provides **programmatic control** over a WKWebView-based browser, enabling AI agents to browse the web, fill forms, click elements, take screenshots, and extract content — all from Swift.
 
 ## ✨ Features
 
@@ -38,14 +42,14 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/haplollc/BrowserKit.git", from: "1.0.0")
+    .package(url: "https://github.com/haplollc/Gepetto.git", from: "1.0.0")
 ]
 ```
 
 **Or in Xcode:**
 
 1. File → Add Package Dependencies
-2. Enter: `https://github.com/haplollc/BrowserKit.git`
+2. Enter: `https://github.com/haplollc/Gepetto.git`
 3. Click Add Package
 
 ---
@@ -55,7 +59,7 @@ dependencies: [
 ### For AI Agents (Tool Executor)
 
 ```swift
-import BrowserKit
+import Gepetto
 
 let executor = BrowserToolExecutor()
 
@@ -90,7 +94,7 @@ await executor.execute(
 ### Direct Engine Control
 
 ```swift
-import BrowserKit
+import Gepetto
 
 let engine = BrowserEngine()
 
@@ -121,7 +125,7 @@ try await engine.type(selector: "#search", text: "M3 Max", delay: 50)
 
 ```swift
 import SwiftUI
-import BrowserKit
+import Gepetto
 
 struct ContentView: View {
     @StateObject var executor = BrowserToolExecutor()
@@ -173,7 +177,7 @@ struct BrowserPage: View {
 
 ## 🤖 LLM Function Calling
 
-BrowserKit provides a ready-to-use JSON schema for AI function calling:
+Gepetto provides a ready-to-use JSON schema for AI function calling:
 
 ```swift
 // Get the schema for your LLM
@@ -344,7 +348,7 @@ swift test --filter BrowserToolTests
 ## 🏗️ Architecture
 
 ```
-BrowserKit
+Gepetto
 ├── Core
 │   ├── BrowserEngine      # WKWebView controller (actor)
 │   ├── BrowserTypes       # Configuration, results, info structs

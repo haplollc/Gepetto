@@ -1,17 +1,17 @@
 //
-//  BrowserKit.swift
-//  BrowserKit
+//  Gepetto.swift
+//  Gepetto
 //
 //  iOS/macOS browser automation for AI agents.
 //
-//  BrowserKit provides programmatic control over a WKWebView-based browser,
+//  Gepetto provides programmatic control over a WKWebView-based browser,
 //  enabling AI agents to navigate the web, fill forms, click elements,
 //  take screenshots, and extract content.
 //
 //  ## Quick Start
 //
 //  ```swift
-//  import BrowserKit
+//  import Gepetto
 //
 //  // Create an executor for AI tool calls
 //  let executor = BrowserToolExecutor()
@@ -55,11 +55,11 @@ import Foundation
 
 // MARK: - Version
 
-/// BrowserKit version
+/// Gepetto version
 public let browserKitVersion = "1.0.0"
 
 // All types are automatically exported since they're declared public in their respective files.
-// Import BrowserKit to access:
+// Import Gepetto to access:
 //
 // Core Types:
 // - BrowserEngine

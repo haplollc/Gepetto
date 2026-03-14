@@ -1,10 +1,10 @@
 //
 //  BrowserToolExecutorTests.swift
-//  BrowserKitTests
+//  GepettoTests
 //
 
 import XCTest
-@testable import BrowserKit
+@testable import Gepetto
 
 @MainActor
 final class BrowserToolExecutorTests: XCTestCase {

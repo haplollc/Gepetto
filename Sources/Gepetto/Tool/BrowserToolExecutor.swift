@@ -1,6 +1,6 @@
 //
 //  BrowserToolExecutor.swift
-//  BrowserKit
+//  Gepetto
 //
 //  Executes browser tool actions from LLM function calls.
 //

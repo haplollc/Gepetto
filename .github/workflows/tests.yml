@@ -19,7 +19,7 @@ jobs:
     - name: Clean workspace
       run: |
         rm -rf ~/Library/Caches/org.swift.swiftpm
-        rm -rf ~/Library/Developer/Xcode/DerivedData/*BrowserKit*
+        rm -rf ~/Library/Developer/Xcode/DerivedData/*Gepetto*
         rm -rf ./*
 
     - name: Generate GitHub App Token
@@ -93,7 +93,7 @@ jobs:
     - name: Build (iOS Simulator)
       run: |
         xcodebuild build \
-          -scheme BrowserKit \
+          -scheme Gepetto \
           -destination 'platform=iOS Simulator,name=iPhone 16 Pro,OS=latest' \
           -skipPackagePluginValidation \
           CODE_SIGNING_ALLOWED=NO \

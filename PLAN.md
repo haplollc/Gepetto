@@ -1,8 +1,8 @@
-# BrowserKit Implementation Plan
+# Gepetto Implementation Plan
 
 ## Overview
 
-BrowserKit is an iOS/macOS browser automation library for AI agents. It provides programmatic control over WKWebView, enabling AI systems to browse the web, fill forms, extract content, and take screenshots.
+Gepetto is an iOS/macOS browser automation library for AI agents. It provides programmatic control over WKWebView, enabling AI systems to browse the web, fill forms, extract content, and take screenshots.
 
 ## Goals
 
@@ -18,8 +18,8 @@ BrowserKit is an iOS/macOS browser automation library for AI agents. It provides
 ## Architecture
 
 ```
-BrowserKit/
-├── Sources/BrowserKit/
+Gepetto/
+├── Sources/Gepetto/
 │   ├── Core/
 │   │   ├── BrowserEngine.swift      # Main WKWebView controller
 │   │   ├── BrowserTypes.swift       # Supporting types
@@ -30,7 +30,7 @@ BrowserKit/
 │   └── Views/
 │       ├── BrowserView.swift        # SwiftUI browser view
 │       └── BrowserSheet.swift       # Presentable sheet
-├── Tests/BrowserKitTests/
+├── Tests/GepettoTests/
 │   ├── BrowserToolTests.swift       # Tool schema tests
 │   ├── BrowserTypesTests.swift      # Type tests
 │   ├── BrowserEngineTests.swift     # Engine tests

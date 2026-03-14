@@ -1,6 +1,6 @@
 //
 //  BrowserTypes.swift
-//  BrowserKit
+//  Gepetto
 //
 //  Core types for browser automation.
 //

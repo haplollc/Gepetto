@@ -1,6 +1,6 @@
 //
 //  BrowserEngine.swift
-//  BrowserKit
+//  Gepetto
 //
 //  Core browser automation engine using WKWebView.
 //  Provides programmatic control over web browsing for AI agents.

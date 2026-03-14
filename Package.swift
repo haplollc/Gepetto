@@ -3,27 +3,27 @@
 import PackageDescription
 
 let package = Package(
-    name: "BrowserKit",
+    name: "Gepetto",
     platforms: [
         .iOS(.v16),
         .macOS(.v13)
     ],
     products: [
         .library(
-            name: "BrowserKit",
-            targets: ["BrowserKit"]
+            name: "Gepetto",
+            targets: ["Gepetto"]
         ),
     ],
     targets: [
         .target(
-            name: "BrowserKit",
+            name: "Gepetto",
             dependencies: [],
-            path: "Sources/BrowserKit"
+            path: "Sources/Gepetto"
         ),
         .testTarget(
-            name: "BrowserKitTests",
-            dependencies: ["BrowserKit"],
-            path: "Tests/BrowserKitTests"
+            name: "GepettoTests",
+            dependencies: ["Gepetto"],
+            path: "Tests/GepettoTests"
         ),
     ]
 )
