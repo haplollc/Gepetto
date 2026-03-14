@@ -1,21 +1,36 @@
-# BrowserKit 🌐
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-iOS%2016%2B%20%7C%20macOS%2013%2B-blue" alt="Platform">
+  <img src="https://img.shields.io/badge/Swift-5.9%2B-orange" alt="Swift">
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="License">
+</p>
 
-**iOS/macOS browser automation for AI agents.**
+<h1 align="center">🌐 BrowserKit</h1>
 
-BrowserKit provides programmatic control over a WKWebView-based browser, enabling AI agents to navigate the web, fill forms, click elements, take screenshots, and extract content — all from Swift.
+<p align="center">
+  <strong>iOS & macOS browser automation for AI agents</strong><br>
+  Navigate • Extract • Interact • Screenshot
+</p>
 
-## Features
+---
 
-- 🧭 **Navigation**: Load URLs, go back/forward, reload
-- 📸 **Screenshots**: Capture viewport or full page
-- 📝 **Form Filling**: Fill inputs, select dropdowns, check boxes
-- 🖱️ **Interactions**: Click elements, type text, scroll
-- 📄 **Content Extraction**: Get text, HTML, links, form fields
-- ⏳ **Waiting**: Wait for elements, text, or navigation
-- 🤖 **LLM Tool Schema**: Ready-to-use JSON schema for function calling
-- 🎨 **SwiftUI Views**: Drop-in browser views and sheets
+BrowserKit provides **programmatic control** over a WKWebView-based browser, enabling AI agents to browse the web, fill forms, click elements, take screenshots, and extract content — all from Swift.
 
-## Installation
+## ✨ Features
+
+| Category | Capabilities |
+|----------|-------------|
+| 🧭 **Navigation** | Load URLs, go back/forward, reload, wait for load |
+| 📸 **Screenshots** | Capture viewport or full scrollable page as PNG |
+| 📝 **Form Filling** | Fill inputs, select dropdowns, check boxes, submit |
+| 🖱️ **Interactions** | Click elements, type text, scroll in any direction |
+| 📄 **Extraction** | Get text, HTML, all links, form fields |
+| ⏳ **Waiting** | Wait for elements, text, or navigation to complete |
+| 🤖 **AI Ready** | JSON schema for LLM function calling |
+| 🎨 **SwiftUI** | Drop-in views, sheets, and modifiers |
+
+---
+
+## 📦 Installation
 
 ### Swift Package Manager
 
@@ -27,84 +42,93 @@ dependencies: [
 ]
 ```
 
-Or in Xcode: File → Add Package Dependencies → Enter URL:
-```
-https://github.com/haplollc/BrowserKit.git
-```
+**Or in Xcode:**
 
-## Quick Start
+1. File → Add Package Dependencies
+2. Enter: `https://github.com/haplollc/BrowserKit.git`
+3. Click Add Package
 
-### Basic Usage
+---
+
+## 🚀 Quick Start
+
+### For AI Agents (Tool Executor)
 
 ```swift
 import BrowserKit
 
-// Create an executor for AI tool calls
 let executor = BrowserToolExecutor()
 
 // Navigate to a page
-let result = await executor.execute(
+await executor.execute(
     BrowserTool.Parameters(action: .navigate, url: "https://example.com")
 )
 
-// Take a screenshot
+// Take a screenshot for vision model
 let screenshot = await executor.execute(
     BrowserTool.Parameters(action: .screenshot, fullPage: true)
 )
 // screenshot.screenshot contains PNG data
 
-// Extract text
+// Extract all text
 let text = await executor.execute(
     BrowserTool.Parameters(action: .extractText)
 )
-print(text.data) // All text on the page
+print(text.data!) // Page content
 
 // Fill a form
 await executor.execute(
     BrowserTool.Parameters(action: .fill, selector: "#email", text: "user@example.com")
 )
 
-// Click a button
+// Click submit
 await executor.execute(
     BrowserTool.Parameters(action: .click, selector: "#submit")
 )
 ```
 
-### Direct Engine Access
-
-For more control, use `BrowserEngine` directly:
+### Direct Engine Control
 
 ```swift
+import BrowserKit
+
 let engine = BrowserEngine()
 
 // Navigate
-try await engine.navigate(to: "https://example.com")
+try await engine.navigate(to: "https://apple.com")
+
+// Wait for element
+try await engine.waitForElement(selector: ".hero-headline")
+
+// Extract content
+let title = try await engine.getTitle()
+let links = try await engine.extractLinks()
 
 // Take screenshot
 let imageData = try await engine.screenshot(fullPage: true)
 
-// Fill form
-try await engine.fill(selector: "#search", text: "query")
-
-// Click
-try await engine.click(selector: ".search-button")
-
-// Wait for results
-try await engine.waitForElement(selector: ".results")
-
-// Extract
-let text = try await engine.extractText()
+// Interact
+try await engine.click(selector: ".shop-button")
+try await engine.fill(selector: "#search", text: "MacBook Pro")
+try await engine.type(selector: "#search", text: "M3 Max", delay: 50)
 ```
 
-### SwiftUI Integration
+---
+
+## 🎨 SwiftUI Integration
+
+### Browser Sheet
 
 ```swift
+import SwiftUI
+import BrowserKit
+
 struct ContentView: View {
     @StateObject var executor = BrowserToolExecutor()
     @State var showBrowser = false
     
     var body: some View {
-        Button("Open Browser") { 
+        Button("🌐 Open Browser") { 
             showBrowser = true 
         }
         .browserSheet(
@@ -116,30 +140,46 @@ struct ContentView: View {
 }
 ```
 
-Or use `BrowserView` directly:
+### Embedded Browser View
 
 ```swift
 struct BrowserPage: View {
     @StateObject var engine = BrowserEngine()
     
     var body: some View {
-        BrowserView(engine: engine)
-            .task {
-                try? await engine.navigate(to: "https://example.com")
-            }
+        VStack(spacing: 0) {
+            BrowserNavBar(engine: engine)
+            BrowserView(engine: engine, showNavBar: false)
+        }
+        .task {
+            try? await engine.navigate(to: "https://example.com")
+        }
     }
 }
 ```
 
-## LLM Tool Integration
-
-BrowserKit provides a JSON schema for LLM function calling:
+### Full Screen Browser
 
 ```swift
-// Get the tool schema
+.browserFullScreen(
+    isPresented: $showBrowser,
+    executor: executor,
+    initialURL: "https://google.com",
+    title: "Search"
+)
+```
+
+---
+
+## 🤖 LLM Function Calling
+
+BrowserKit provides a ready-to-use JSON schema for AI function calling:
+
+```swift
+// Get the schema for your LLM
 let schema = BrowserTool.jsonSchema
 
-// Execute from JSON (from LLM response)
+// Execute actions from LLM responses
 let params: [String: Any] = [
     "action": "navigate",
     "url": "https://example.com"
@@ -147,10 +187,35 @@ let params: [String: Any] = [
 let result = await executor.execute(json: params)
 ```
 
-### Available Actions
+### Compact Schema (for context)
 
-| Action | Parameters | Description |
-|--------|------------|-------------|
+```
+browser(action, url?, selector?, text?, script?, direction?, fullPage?, ...)
+
+Actions:
+- navigate(url): Go to URL
+- screenshot(fullPage?): Capture page as PNG
+- extract_text: Get all text content
+- extract_links: Get all links [{href, text}]
+- extract_forms: Get form fields [{selector, type, name}]
+- click(selector): Click element
+- click_text(text, tag?): Click by visible text
+- fill(selector, text): Fill input field
+- type(selector, text, delay?): Type with keystrokes
+- select(selector, value): Select dropdown option
+- scroll(direction): Scroll up/down/left/right
+- scroll_to(selector): Scroll element into view
+- wait_for_element(selector, timeout?): Wait for element
+- wait_for_text(text, timeout?): Wait for text to appear
+- evaluate(script): Execute JavaScript
+```
+
+---
+
+## 📋 All Actions
+
+| Action | Required Params | Description |
+|--------|----------------|-------------|
 | `navigate` | `url` | Navigate to URL |
 | `go_back` | - | Go back in history |
 | `go_forward` | - | Go forward in history |
@@ -159,9 +224,11 @@ let result = await executor.execute(json: params)
 | `extract_text` | - | Get page text content |
 | `extract_html` | `selector?` | Get HTML (all or element) |
 | `extract_links` | - | Get all links on page |
-| `extract_forms` | - | Get form fields |
+| `extract_forms` | - | Get form field info |
+| `get_title` | - | Get page title |
+| `get_url` | - | Get current URL |
 | `click` | `selector` | Click element |
-| `click_text` | `text`, `tag?` | Click element by text |
+| `click_text` | `text`, `tag?` | Click by visible text |
 | `fill` | `selector`, `text` | Fill input field |
 | `type` | `selector`, `text`, `delay?` | Type with keystrokes |
 | `clear` | `selector` | Clear input field |
@@ -177,58 +244,128 @@ let result = await executor.execute(json: params)
 | `wait_for_navigation` | `timeout?` | Wait for page load |
 | `evaluate` | `script` | Execute JavaScript |
 
-## Example: AI Web Research
+---
+
+## 🔍 Example: AI Web Research Agent
 
 ```swift
-class AIBrowser {
+class WebResearchAgent {
     let executor = BrowserToolExecutor()
     
-    func research(query: String) async -> String {
-        // Navigate to search engine
+    func research(_ query: String) async -> ResearchResult {
+        // 1. Go to search engine
         await executor.execute(
             BrowserTool.Parameters(action: .navigate, url: "https://google.com")
         )
         
-        // Type search query
+        // 2. Type search query
         await executor.execute(
-            BrowserTool.Parameters(action: .type, selector: "input[name=q]", text: query)
+            BrowserTool.Parameters(
+                action: .type, 
+                selector: "textarea[name=q]", 
+                text: query,
+                delay: 30
+            )
         )
         
-        // Press Enter (submit)
+        // 3. Submit search
         await executor.execute(
-            BrowserTool.Parameters(action: .evaluate, script: "document.querySelector('input[name=q]').form.submit()")
+            BrowserTool.Parameters(
+                action: .evaluate, 
+                script: "document.querySelector('form').submit()"
+            )
         )
         
-        // Wait for results
+        // 4. Wait for results
         await executor.execute(
-            BrowserTool.Parameters(action: .waitForElement, selector: "#search")
+            BrowserTool.Parameters(
+                action: .waitForElement, 
+                selector: "#search",
+                timeout: 10
+            )
         )
         
-        // Take screenshot for vision model
+        // 5. Screenshot for vision model
         let screenshot = await executor.execute(
             BrowserTool.Parameters(action: .screenshot)
         )
         
-        // Extract text
+        // 6. Extract links
+        let links = await executor.execute(
+            BrowserTool.Parameters(action: .extractLinks)
+        )
+        
+        // 7. Get text summary
         let text = await executor.execute(
             BrowserTool.Parameters(action: .extractText)
         )
         
-        return text.data ?? ""
+        return ResearchResult(
+            screenshot: screenshot.screenshot,
+            links: links.links ?? [],
+            textContent: text.data ?? ""
+        )
     }
 }
 ```
 
-## Requirements
+---
 
-- iOS 16.0+ / macOS 13.0+
-- Swift 5.9+
-- Xcode 15.0+
+## 🧪 Testing
 
-## License
+```bash
+# Run all tests
+swift test
+
+# Run specific test file
+swift test --filter BrowserToolTests
+```
+
+**56 tests** covering:
+- Action encoding/decoding
+- JSON schema structure
+- Error handling
+- Executor lifecycle
+- Parameter validation
+
+---
+
+## 📱 Platform Support
+
+| Platform | Minimum Version | Status |
+|----------|----------------|--------|
+| iOS | 16.0 | ✅ Full Support |
+| macOS | 13.0 | ✅ Full Support |
+| iPadOS | 16.0 | ✅ Full Support |
+| Mac Catalyst | 16.0 | ✅ Full Support |
+
+---
+
+## 🏗️ Architecture
+
+```
+BrowserKit
+├── Core
+│   ├── BrowserEngine      # WKWebView controller (actor)
+│   ├── BrowserTypes       # Configuration, results, info structs
+│   └── BrowserError       # Error types with user messages
+├── Tool
+│   ├── BrowserTool        # LLM schema (Action, Parameters, Result)
+│   └── BrowserToolExecutor # Execute actions, manage lifecycle
+└── Views
+    ├── BrowserView        # SwiftUI WKWebView wrapper
+    ├── BrowserNavBar      # URL bar with back/forward
+    └── BrowserSheet       # Modal presentation
+```
+
+---
+
+## 📄 License
 
 MIT License - see [LICENSE](LICENSE) for details.
 
-## Author
+---
 
-Created by [Haplo LLC](https://github.com/haplollc)
+<p align="center">
+  Built with ❤️ by <a href="https://github.com/haplollc">Haplo LLC</a>
+</p>
