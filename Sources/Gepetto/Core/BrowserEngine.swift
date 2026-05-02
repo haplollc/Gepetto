@@ -276,8 +276,18 @@ public final class BrowserEngine: NSObject, ObservableObject {
     }
     
     /// Extract all text content from the page.
+    /// Prefers `innerText` (rendered, visible text only) but falls back to
+    /// `textContent` when the engine is running headless or pre-layout, where
+    /// `innerText` returns an empty string.
     public func extractText() async throws -> String {
-        let result = try await evaluateJavaScript("document.body.innerText")
+        let js = """
+        (function () {
+            var rendered = document.body && document.body.innerText ? document.body.innerText : '';
+            if (rendered && rendered.trim().length > 0) { return rendered; }
+            return document.body ? document.body.textContent || '' : '';
+        })();
+        """
+        let result = try await evaluateJavaScript(js)
         return result as? String ?? ""
     }
     
