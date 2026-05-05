@@ -14,7 +14,10 @@ extension BrowserAgent {
 
     // MARK: - Deterministic form fill
 
-    func deterministicFormFill(
+    /// Drive a form deterministically: extract_forms → match each planned
+    /// value to a real input → fill each → optionally click/submit.
+    /// Returns a snapshot summary of the resulting page.
+    public func deterministicFormFill(
         plan: FormFillPlan,
         executor: BrowserToolExecutor,
         onEvent: @escaping (BrowserAgentEvent) -> Void
@@ -68,7 +71,8 @@ extension BrowserAgent {
 
     /// Match a natural-language hint ("username", "password", "email",
     /// "search", "title", "url") to the most-likely real form field.
-    func matchField(
+    /// Public so consumers and tests can verify which selector is picked.
+    public func matchField(
         hint: String,
         value: String,
         fields: [BrowserTool.FormFieldResult],
