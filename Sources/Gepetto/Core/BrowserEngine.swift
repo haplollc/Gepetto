@@ -344,22 +344,66 @@ public final class BrowserEngine: NSObject, ObservableObject {
     
     /// Extract form fields from the page.
     public func extractFormFields() async throws -> [FormFieldInfo] {
+        // Skip type=hidden inputs entirely — they're never something a user
+        // would want to "fill" in their natural-language instruction. We
+        // also enrich the placeholder field with nearby visible label text
+        // (an explicit <label for=>, an enclosing <label>, an aria-label,
+        // or the previous-sibling cell text in old table-style HTML like
+        // Hacker News) so heuristic matchers have something better than
+        // raw `name=acct` to work with.
         let js = """
-        Array.from(document.querySelectorAll('input, textarea, select')).map(el => ({
-            type: el.type || el.tagName.toLowerCase(),
-            name: el.name || '',
-            id: el.id || '',
-            placeholder: el.placeholder || '',
-            value: el.value || '',
-            selector: el.id ? '#' + el.id : (el.name ? '[name="' + el.name + '"]' : null)
-        })).filter(f => f.selector)
+        (function () {
+          function nearbyLabel(el) {
+            // 1. <label for="id">
+            if (el.id) {
+              var lbl = document.querySelector('label[for="' + el.id + '"]');
+              if (lbl && lbl.textContent) return lbl.textContent.trim();
+            }
+            // 2. enclosing <label>
+            var p = el.parentElement;
+            while (p) {
+              if (p.tagName === 'LABEL') return (p.textContent || '').trim();
+              p = p.parentElement;
+            }
+            // 3. aria-label / aria-labelledby
+            var aria = el.getAttribute('aria-label');
+            if (aria) return aria.trim();
+            var ariaBy = el.getAttribute('aria-labelledby');
+            if (ariaBy) {
+              var by = document.getElementById(ariaBy);
+              if (by) return (by.textContent || '').trim();
+            }
+            // 4. previous-sibling td (HN's <td>username:</td><td><input></td> pattern)
+            var td = el.closest('td');
+            if (td && td.previousElementSibling) {
+              return (td.previousElementSibling.textContent || '').trim();
+            }
+            // 5. preceding text node in the same parent
+            if (el.previousSibling && el.previousSibling.nodeType === 3) {
+              return (el.previousSibling.textContent || '').trim();
+            }
+            return '';
+          }
+          return Array.from(document.querySelectorAll('input, textarea, select'))
+            .filter(el => (el.type || '').toLowerCase() !== 'hidden')
+            .map(el => ({
+              type: el.type || el.tagName.toLowerCase(),
+              name: el.name || '',
+              id: el.id || '',
+              placeholder: el.placeholder || nearbyLabel(el),
+              value: el.value || '',
+              selector: el.id ? '#' + CSS.escape(el.id)
+                              : (el.name ? '[name="' + el.name + '"]' : null)
+            }))
+            .filter(f => f.selector);
+        })()
         """
-        
+
         let result = try await evaluateJavaScript(js)
         guard let fields = result as? [[String: Any]] else {
             return []
         }
-        
+
         return fields.compactMap { dict in
             guard let selector = dict["selector"] as? String else { return nil }
             return FormFieldInfo(

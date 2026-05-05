@@ -14,9 +14,15 @@ extension BrowserAgent {
 
     // MARK: - Deterministic form fill
 
-    /// Drive a form deterministically: extract_forms → match each planned
-    /// value to a real input → fill each → optionally click/submit.
-    /// Returns a snapshot summary of the resulting page.
+    /// Drive a form deterministically with post-fill verification:
+    ///   1. extract_forms → get real selectors
+    ///   2. for each planned value: pick the best field, fill it, then read
+    ///      back the value via JS. If the readback doesn't match, retry with
+    ///      the keystroke-based `type` action which dispatches keyboard
+    ///      events and works around inputs that reject scripted assignment.
+    ///   3. submit the FORM that contains the fields we filled (not just
+    ///      `document.querySelector('input[type=submit]')` which can pick a
+    ///      submit button from the wrong form on pages with multiple forms).
     public func deterministicFormFill(
         plan: FormFillPlan,
         executor: BrowserToolExecutor,
@@ -26,35 +32,32 @@ extension BrowserAgent {
         let fields = formsResult.formFields ?? []
 
         var alreadyUsed = Set<String>()
+        var firstFilledSelector: String? = nil
         for pair in plan.values {
-            guard let pick = matchField(hint: pair.fieldHint, value: pair.value, fields: fields, exclude: alreadyUsed) else { continue }
+            guard let pick = matchField(hint: pair.fieldHint, value: pair.value, fields: fields, exclude: alreadyUsed) else {
+                print("⚠️ [Gepetto] no field matched hint='\(pair.fieldHint)' for value='\(pair.value.prefix(8))…'")
+                continue
+            }
             alreadyUsed.insert(pick.selector)
-            onEvent(.action(name: "fill", arguments: [
-                "selector": pick.selector, "text": pair.value, "field": pick.label
-            ]))
-            isExecuting = true
-            _ = await executor.execute(json: [
-                "action": "fill", "selector": pick.selector, "text": pair.value
-            ])
-            isExecuting = false
+            if firstFilledSelector == nil { firstFilledSelector = pick.selector }
+
+            await fillAndVerify(
+                selector: pick.selector,
+                value: pair.value,
+                label: pick.label,
+                executor: executor,
+                onEvent: onEvent
+            )
             try? await Task.sleep(nanoseconds: 400_000_000)
         }
 
         if plan.shouldSubmit {
             try? await Task.sleep(nanoseconds: 500_000_000)
-            onEvent(.action(name: "submit", arguments: ["via": "click_submit_or_form_submit"]))
+            onEvent(.action(name: "submit", arguments: ["via": "form_scoped_submit"]))
             isExecuting = true
             _ = await executor.execute(json: [
                 "action": "evaluate",
-                "script": """
-                (function () {
-                    var btn = document.querySelector('input[type=submit], button[type=submit]');
-                    if (btn) { btn.click(); return 'clicked-button'; }
-                    var form = document.querySelector('form');
-                    if (form) { form.submit(); return 'form-submit'; }
-                    return 'no-form';
-                })();
-                """
+                "script": formScopedSubmitScript(anchorSelector: firstFilledSelector ?? "")
             ])
             isExecuting = false
             try? await Task.sleep(nanoseconds: 1_500_000_000)
@@ -67,6 +70,118 @@ extension BrowserAgent {
         )
         onEvent(.actionResult(summary: snapshot, success: true))
         return snapshot
+    }
+
+    /// Fill a field, read back its value, and retry with the keystroke-based
+    /// `type` action if the readback doesn't match what we tried to set.
+    /// This catches inputs that reject `el.value = X` (rare, but real on
+    /// some controlled-input frameworks like React with onChange handlers).
+    private func fillAndVerify(
+        selector: String,
+        value: String,
+        label: String,
+        executor: BrowserToolExecutor,
+        onEvent: @escaping (BrowserAgentEvent) -> Void
+    ) async {
+        onEvent(.action(name: "fill", arguments: [
+            "selector": selector, "text": value, "field": label
+        ]))
+        isExecuting = true
+        _ = await executor.execute(json: [
+            "action": "fill", "selector": selector, "text": value
+        ])
+        isExecuting = false
+
+        // Read back the value via JS to verify the fill actually took.
+        let readback = await executor.execute(json: [
+            "action": "evaluate",
+            "script": "(document.querySelector(\(jsString(selector)))?.value) ?? ''"
+        ])
+        let actual = readback.data ?? ""
+        if actual == value {
+            print("✅ [Gepetto] fill verified: \(selector) = \(value.prefix(8))…")
+            return
+        }
+
+        // Mismatch — retry with `type` (focus + per-character keystrokes).
+        // First clear, then type.
+        print("⚠️ [Gepetto] fill verification FAILED for \(selector). expected=\(value.prefix(12)) got='\(actual.prefix(12))'. Retrying with type().")
+        _ = await executor.execute(json: [
+            "action": "evaluate",
+            "script": "(function(){var e=document.querySelector(\(jsString(selector)));if(e){e.value='';e.focus();}return 'cleared';})();"
+        ])
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        isExecuting = true
+        _ = await executor.execute(json: [
+            "action": "type", "selector": selector, "text": value, "delay": 30
+        ])
+        isExecuting = false
+
+        let readback2 = await executor.execute(json: [
+            "action": "evaluate",
+            "script": "(document.querySelector(\(jsString(selector)))?.value) ?? ''"
+        ])
+        let actual2 = readback2.data ?? ""
+        if actual2 == value {
+            print("✅ [Gepetto] type() retry succeeded: \(selector)")
+        } else {
+            print("❌ [Gepetto] still couldn't fill \(selector) after type() retry. expected=\(value.prefix(12)) got='\(actual2.prefix(12))'")
+        }
+    }
+
+    /// JS that submits the FORM containing the field at `anchorSelector`,
+    /// not just the first submit button on the page. Falls back gracefully
+    /// when there's no anchor (e.g. an empty fill plan with shouldSubmit).
+    private func formScopedSubmitScript(anchorSelector: String) -> String {
+        guard !anchorSelector.isEmpty else {
+            return """
+            (function () {
+                var btn = document.querySelector('input[type=submit], button[type=submit]');
+                if (btn) { btn.click(); return 'clicked-button'; }
+                var form = document.querySelector('form');
+                if (form) { form.submit(); return 'form-submit'; }
+                return 'no-form';
+            })();
+            """
+        }
+        return """
+        (function () {
+            var anchor = document.querySelector(\(jsString(anchorSelector)));
+            if (!anchor) {
+                var btn = document.querySelector('input[type=submit], button[type=submit]');
+                if (btn) { btn.click(); return 'no-anchor-clicked-fallback-button'; }
+                return 'no-anchor-no-button';
+            }
+            var form = anchor.form || anchor.closest('form');
+            if (!form) {
+                anchor.click(); return 'no-form-clicked-anchor';
+            }
+            // Prefer a submit button INSIDE this specific form so we trigger
+            // any form-scoped onsubmit handler the page wires up.
+            var btn = form.querySelector('input[type=submit], button[type=submit], button:not([type])');
+            if (btn) { btn.click(); return 'clicked-form-button'; }
+            form.submit();
+            return 'form-submit';
+        })();
+        """
+    }
+
+    /// Quote a Swift string as a JS string literal, including special chars
+    /// (backslashes, quotes, newlines).
+    private func jsString(_ s: String) -> String {
+        var out = "\""
+        for c in s {
+            switch c {
+            case "\\": out.append("\\\\")
+            case "\"": out.append("\\\"")
+            case "\n": out.append("\\n")
+            case "\r": out.append("\\r")
+            case "\t": out.append("\\t")
+            default:   out.append(c)
+            }
+        }
+        out.append("\"")
+        return out
     }
 
     /// Match a natural-language hint ("username", "password", "email",
