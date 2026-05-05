@@ -6,3 +6,19 @@ DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+
+# --- Per-user / agent-tool config (never commit to a public package) ---
+CLAUDE.md
+.claude/
+.agents/
+.blitz/
+.codex/
+.mcp.json
+opencode.json
+.cursor/
+.cursorrules
+GEMINI.md
+AGENTS.md
+.env
+.env.*
+*.dev.vars
