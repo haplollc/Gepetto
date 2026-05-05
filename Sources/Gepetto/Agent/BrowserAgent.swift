@@ -73,7 +73,7 @@ public struct BrowserAgentConfiguration: Sendable {
     public init(
         maxIterations: Int = 8,
         validateEachStage: Bool = true,
-        visualPaceMs: Int = 800,
+        visualPaceMs: Int = 1500,
         headlessViewport: CGSize = CGSize(width: 1024, height: 1366)
     ) {
         self.maxIterations = maxIterations
