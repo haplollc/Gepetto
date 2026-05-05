@@ -323,6 +323,7 @@ Gepetto powers the in-chat browser agent in **[HaploAI iOS](https://github.com/h
 - **Multi-step agent loop** — the LLM emits `<tool_call>` blocks, results are fed back into the next iteration, until a final natural-language answer.
 - **Deterministic form-fill takeover** — when the LLM fumbles selectors, the wrapper extracts real fields via `extract_forms` and fills them by name/type heuristics so a weak local model can still complete a form and click submit.
 - **Auto-content-click** — when the user says *"click into the top story"*, the wrapper picks the first external link from the latest snapshot and navigates deterministically.
+- **Multi-stage scripted automation** — a single user prompt can describe a chain of (URL + form-fill + submit) stages (e.g. *"log in at /login, then go to /submit and post X"*); the runner detects the multiple URLs, parses each segment for typing intent, and drives every stage end-to-end deterministically. The LLM is only invoked at the end for a 1–2-sentence summary based on the final page state, so weak local models can complete complex multi-page flows reliably.
 
 See [HaploAI iOS](https://github.com/haplollc/HaploAI_iOS) for the full agent runner, the live SwiftUI panel, and integration tests.
 
