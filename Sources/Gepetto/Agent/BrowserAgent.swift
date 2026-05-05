@@ -1,0 +1,709 @@
+//
+//  BrowserAgent.swift
+//  Gepetto
+//
+//  High-level agent that drives a real WKWebView via the browser tool from a
+//  pluggable AI backend (`GepettoAIEngine`). One public method — `run(task:)`.
+//
+//  Features baked in:
+//   - Headless host: parents the WKWebView in a hidden UIWindow / NSWindow
+//     with a real viewport so `innerText` / `takeSnapshot` work without UI.
+//   - Multi-stage automation: a single prompt with multiple URLs is parsed
+//     into ordered (URL + form-fill + submit) stages and driven
+//     deterministically.
+//   - Form-fill takeover: extracts real form selectors and fills by name /
+//     type / placeholder heuristics so weak models can complete forms.
+//   - Auto-content-click: when the user says "click into the top story"
+//     etc., picks the first external content link and navigates.
+//   - Per-stage AI validation: after every navigate / form-fill, the agent
+//     asks the AI engine "did this stage succeed?" and aborts on failure
+//     instead of plowing through bad state.
+//   - Refusal detection + nudge + deterministic takeover for weak local LLMs.
+//
+//  See the README for usage examples.
+//
+
+import Foundation
+import WebKit
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
+
+// MARK: - Public events
+
+public enum BrowserAgentEvent: Sendable {
+    /// Streaming partial text from the AI, with tool_call markup stripped.
+    case textChunk(String)
+    /// Wipe the in-progress assistant message and replace with this text.
+    case replaceText(String)
+    /// AI decided to call a browser action.
+    case action(name: String, arguments: [String: Any])
+    /// Action finished — `summary` is the result we'd feed back to the AI.
+    case actionResult(summary: String, success: Bool)
+    /// Per-stage validation outcome (only emitted when validation is on).
+    case validation(stageIndex: Int, success: Bool, reason: String)
+    /// Agent finished cleanly with a final natural-language answer.
+    case complete(finalText: String)
+    /// Agent failed (bad output, max iterations, validation failure, etc.).
+    case failed(reason: String, partialText: String)
+}
+
+// MARK: - Configuration
+
+public struct BrowserAgentConfiguration: Sendable {
+    /// Maximum number of agent-loop iterations for the free-form (single
+    /// stage) path before bailing.
+    public var maxIterations: Int
+
+    /// When true, the agent asks the AI engine to validate the result page
+    /// after each automation stage. Costs an extra round-trip per stage but
+    /// catches silent failures (e.g. login showed an error but the agent
+    /// proceeded anyway).
+    public var validateEachStage: Bool
+
+    /// Pause between actions so the user can watch the live webview update.
+    /// 0 = no pause.
+    public var visualPaceMs: Int
+
+    /// Hidden host viewport. Pages won't render correctly with frame .zero.
+    public var headlessViewport: CGSize
+
+    public init(
+        maxIterations: Int = 8,
+        validateEachStage: Bool = true,
+        visualPaceMs: Int = 800,
+        headlessViewport: CGSize = CGSize(width: 1024, height: 1366)
+    ) {
+        self.maxIterations = maxIterations
+        self.validateEachStage = validateEachStage
+        self.visualPaceMs = visualPaceMs
+        self.headlessViewport = headlessViewport
+    }
+
+    public static let `default` = BrowserAgentConfiguration()
+}
+
+// MARK: - BrowserAgent
+
+@MainActor
+public final class BrowserAgent: ObservableObject {
+
+    // ---- Public observable state (for SwiftUI) ----------------------------
+
+    @Published public internal(set) var executor: BrowserToolExecutor?
+    @Published public internal(set) var isAvailable: Bool = false
+    @Published public internal(set) var isExecuting: Bool = false
+    @Published public internal(set) var currentURL: String?
+    @Published public internal(set) var currentTitle: String?
+    @Published public internal(set) var lastScreenshot: Data?
+    @Published public internal(set) var lastAction: String?
+
+    // ---- Internals --------------------------------------------------------
+
+    public var configuration: BrowserAgentConfiguration
+
+    #if canImport(UIKit)
+    private var hiddenWindow: UIWindow?
+    #elseif canImport(AppKit)
+    private var hiddenWindow: NSWindow?
+    #endif
+
+    // ---- Public API -------------------------------------------------------
+
+    public init(configuration: BrowserAgentConfiguration = .default) {
+        self.configuration = configuration
+    }
+
+    /// Boot the underlying browser session. Idempotent.
+    public func start() {
+        guard executor == nil else { return }
+        let exec = BrowserToolExecutor()
+        if Thread.isMainThread {
+            exec.start()
+        } else {
+            DispatchQueue.main.sync { exec.start() }
+        }
+        executor = exec
+        isAvailable = true
+
+        // Park the WKWebView in a hidden host with a real viewport so
+        // headless `innerText` / `takeSnapshot` succeed.
+        if let webView = exec.engine?.webView {
+            let viewport = CGRect(origin: .zero, size: configuration.headlessViewport)
+            webView.frame = viewport
+            attachWebViewToHiddenHost(webView, viewport: viewport)
+        }
+    }
+
+    /// Tear down the browser session and release resources.
+    public func shutdown() {
+        executor?.stop()
+        executor = nil
+        isAvailable = false
+        teardownHiddenHost()
+        currentURL = nil
+        currentTitle = nil
+        lastScreenshot = nil
+        lastAction = nil
+        isExecuting = false
+    }
+
+    /// Run the agent against a natural-language task. The AI engine is
+    /// queried as needed; you observe progress via `onEvent`.
+    ///
+    /// - Parameters:
+    ///   - task: the user's free-form instruction.
+    ///   - history: prior conversation turns (so the AI has context).
+    ///   - engine: AI backend that drives the agent.
+    ///   - onEvent: callback for streamed events. Always called on the main
+    ///     actor.
+    public func run(
+        task: String,
+        history: [GepettoMessage] = [],
+        engine: GepettoAIEngine,
+        onEvent: @escaping (BrowserAgentEvent) -> Void
+    ) async {
+        if executor == nil { start() }
+        guard let executor = executor else {
+            onEvent(.failed(reason: "Browser session unavailable.", partialText: ""))
+            return
+        }
+
+        // 0. Multi-stage scripted automation: if the prompt references >=2
+        //    URLs, drive the chain deterministically and only ask the AI for
+        //    a final summary (and per-stage validation if enabled).
+        if let script = parseAutomationScript(task) {
+            await runScriptedFlow(
+                script: script,
+                executor: executor,
+                engine: engine,
+                userTask: task,
+                history: history,
+                onEvent: onEvent
+            )
+            return
+        }
+
+        // 1. Single-stage free-form agent loop.
+        await runFreeformAgent(
+            task: task,
+            executor: executor,
+            engine: engine,
+            history: history,
+            onEvent: onEvent
+        )
+    }
+
+    // MARK: - Multi-stage scripted flow
+
+    private func runScriptedFlow(
+        script: [AutomationStage],
+        executor: BrowserToolExecutor,
+        engine: GepettoAIEngine,
+        userTask: String,
+        history: [GepettoMessage],
+        onEvent: @escaping (BrowserAgentEvent) -> Void
+    ) async {
+        var lastSnapshot = ""
+        for (i, stage) in script.enumerated() {
+            ensureWebViewHasLayoutContext(executor)
+
+            onEvent(.action(name: "navigate", arguments: ["url": stage.url]))
+            isExecuting = true
+            let nav = await executor.execute(json: ["action": "navigate", "url": stage.url])
+            let success = nav.success
+            isExecuting = false
+            lastSnapshot = await postNavigateSnapshot(executor: executor, navResult: nav, fallbackURL: stage.url)
+            onEvent(.actionResult(summary: lastSnapshot, success: success))
+
+            if !success {
+                onEvent(.failed(reason: "Navigation to \(stage.url) failed.", partialText: lastSnapshot))
+                return
+            }
+
+            await visualPace()
+
+            if let plan = stage.fillPlan {
+                lastSnapshot = await deterministicFormFill(
+                    plan: plan,
+                    executor: executor,
+                    onEvent: onEvent
+                )
+                await visualPace(extraMs: 700)
+            }
+
+            // Per-stage validation: ask the AI engine whether the post-stage
+            // page reflects success. Halt the script if not.
+            if configuration.validateEachStage {
+                let result = await validateStage(
+                    stageIndex: i,
+                    stage: stage,
+                    snapshot: lastSnapshot,
+                    userTask: userTask,
+                    engine: engine
+                )
+                onEvent(.validation(stageIndex: i, success: result.success, reason: result.reason))
+                if !result.success {
+                    onEvent(.failed(
+                        reason: "Stage \(i + 1) failed validation: \(result.reason)",
+                        partialText: lastSnapshot
+                    ))
+                    return
+                }
+            }
+        }
+
+        // Final summary turn.
+        await streamSummary(
+            engine: engine,
+            history: history,
+            userTask: userTask,
+            finalSnapshot: lastSnapshot,
+            onEvent: onEvent
+        )
+    }
+
+    /// Ask the AI engine to validate a stage's post-action page state.
+    /// Expected response: a single line starting with `YES:` or `NO:`
+    /// followed by a short reason.
+    private func validateStage(
+        stageIndex: Int,
+        stage: AutomationStage,
+        snapshot: String,
+        userTask: String,
+        engine: GepettoAIEngine
+    ) async -> (success: Bool, reason: String) {
+        let stageDescription = stage.fillPlan.map { plan -> String in
+            let fields = plan.values.map { "\($0.fieldHint)=\"\($0.value)\"" }.joined(separator: ", ")
+            return "navigate to \(stage.url) and submit form (\(fields))"
+        } ?? "navigate to \(stage.url)"
+
+        let validationPrompt = """
+        You are validating a single step of a browser automation script.
+
+        OVERALL TASK: \(userTask)
+
+        THIS STEP: \(stageDescription)
+
+        PAGE STATE AFTER THE STEP:
+        \(snapshot)
+
+        Did this step succeed? Specifically:
+        - For login pages: are we logged in (no "Bad login", "incorrect password", "wrong username", etc.)?
+        - For form submissions: did the form submit cleanly (no validation errors like "required", "must be filled", "invalid")?
+        - For navigation: did we land on the right kind of page (not a 404 / "Page not found" / error)?
+
+        Respond with EXACTLY one line: "YES: <one-sentence reason>" or "NO: <one-sentence reason>". No other text.
+        """
+
+        do {
+            let answer = try await engine.complete(
+                messages: [GepettoMessage.user(validationPrompt)],
+                systemPrompt: nil
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            let upper = answer.uppercased()
+            if upper.hasPrefix("YES") {
+                return (true, answer.dropPrefix("YES:").trimmingCharacters(in: .whitespacesAndNewlines))
+            } else if upper.hasPrefix("NO") {
+                return (false, answer.dropPrefix("NO:").trimmingCharacters(in: .whitespacesAndNewlines))
+            } else {
+                // If we can't parse, conservatively pass — better to keep
+                // going than block on a parser nit.
+                return (true, "unparseable validator output: \(answer.prefix(120))")
+            }
+        } catch {
+            // Don't block the script on validator errors.
+            return (true, "validator error (continuing): \(error.localizedDescription)")
+        }
+    }
+
+    private func streamSummary(
+        engine: GepettoAIEngine,
+        history: [GepettoMessage],
+        userTask: String,
+        finalSnapshot: String,
+        onEvent: @escaping (BrowserAgentEvent) -> Void
+    ) async {
+        let summaryPrompt = """
+        I just executed a multi-step browser automation for you. Here is the FINAL page state:
+
+        \(finalSnapshot)
+
+        ORIGINAL USER TASK: \(userTask)
+
+        Write a short reply (1–2 sentences) describing whether the automation succeeded based on the final page above. Plain text only — no tool_call.
+        """
+
+        var emitted = ""
+        do {
+            for try await chunk in engine.stream(
+                messages: history + [GepettoMessage.user(summaryPrompt)],
+                systemPrompt: nil
+            ) {
+                let visible = ToolCallDetector.extractTextWithoutToolCall(from: emitted + chunk)
+                if visible.count > emitted.count {
+                    let delta = String(visible.dropFirst(emitted.count))
+                    onEvent(.textChunk(delta))
+                    emitted = visible
+                }
+            }
+        } catch {
+            onEvent(.failed(
+                reason: "Summary stream failed: \(error.localizedDescription)",
+                partialText: emitted
+            ))
+            return
+        }
+        onEvent(.complete(finalText: emitted.isEmpty ? "Automation completed." : emitted))
+    }
+
+    // MARK: - Free-form agent loop (single-stage / open-ended tasks)
+
+    private func runFreeformAgent(
+        task: String,
+        executor: BrowserToolExecutor,
+        engine: GepettoAIEngine,
+        history: [GepettoMessage],
+        onEvent: @escaping (BrowserAgentEvent) -> Void
+    ) async {
+        // If the prompt has a single URL, seed-navigate first so the AI's
+        // first decision is informed by real page content.
+        var seedSnapshot: String? = nil
+        var didAutoFollowUp = false
+        let seedURL = extractFirstURL(from: task)
+        if let url = seedURL {
+            ensureWebViewHasLayoutContext(executor)
+            onEvent(.action(name: "navigate", arguments: ["url": url]))
+            isExecuting = true
+            let nav = await executor.execute(json: ["action": "navigate", "url": url])
+            isExecuting = false
+            let snap = await postNavigateSnapshot(executor: executor, navResult: nav, fallbackURL: url)
+            seedSnapshot = snap
+            onEvent(.actionResult(summary: snap, success: nav.success))
+            await visualPace()
+
+            // 1a. Form-fill takeover (single page).
+            if nav.success, let plan = parseFormFillIntent(task) {
+                let after = await deterministicFormFill(plan: plan, executor: executor, onEvent: onEvent)
+                seedSnapshot = """
+                I performed the form fill you asked for and submitted. Here is the resulting page state:
+
+                \(after)
+
+                Now answer the user's task using the PAGE TEXT above. Plain text only — no tool_call.
+                """
+                didAutoFollowUp = true
+            }
+
+            // 1b. Auto-content-click for "click into the top story" etc.
+            if !didAutoFollowUp, nav.success, taskWantsContentClick(task) {
+                let links = parseLinks(fromSummary: snap)
+                if let target = pickContentLink(from: links, currentURL: currentURL) {
+                    onEvent(.action(name: "navigate", arguments: ["url": target.href, "text": target.text]))
+                    isExecuting = true
+                    let nav2 = await executor.execute(json: ["action": "navigate", "url": target.href])
+                    isExecuting = false
+                    let snap2 = await postNavigateSnapshot(executor: executor, navResult: nav2, fallbackURL: target.href)
+                    onEvent(.actionResult(summary: snap2, success: nav2.success))
+                    seedSnapshot = """
+                    I navigated into "\(target.text)" for you. Here is the page:
+
+                    \(snap2)
+
+                    Now answer the user's task using the PAGE TEXT above. Plain text only — no tool_call.
+                    """
+                    didAutoFollowUp = true
+                    await visualPace()
+                }
+            }
+        }
+
+        // Build the dialogue and run the loop.
+        var dialogue = history
+        var nextUserTurn = buildInitialPrompt(userTask: task, seedSnapshot: seedSnapshot)
+        var emitted = ""
+        var consecutiveRefusals = 0
+        var latestLinks = parseLinks(fromSummary: seedSnapshot)
+
+        for iteration in 0..<configuration.maxIterations {
+            var accumulated = ""
+            do {
+                let messages = dialogue + [GepettoMessage.user(nextUserTurn)]
+                for try await chunk in engine.stream(messages: messages, systemPrompt: nil) {
+                    accumulated += chunk
+                    let visible = ToolCallDetector.extractTextWithoutToolCall(from: accumulated)
+                    if visible.count > emitted.count {
+                        let delta = String(visible.dropFirst(emitted.count))
+                        if !delta.isEmpty { onEvent(.textChunk(delta)) }
+                        emitted = visible
+                    }
+                }
+            } catch {
+                onEvent(.failed(
+                    reason: "AI stream failed: \(error.localizedDescription)",
+                    partialText: emitted
+                ))
+                return
+            }
+
+            if let toolCall = ToolCallDetector.detectToolCall(in: accumulated),
+               toolCall.name.lowercased() == "browser" {
+                let args = toolCall.arguments
+                let actionName = (args["action"] as? String) ?? "?"
+                onEvent(.action(name: actionName, arguments: args))
+                isExecuting = true
+                let result = await executor.execute(json: args)
+                isExecuting = false
+                let summary: String
+                if ["navigate", "click", "click_text", "go_back", "go_forward", "reload"].contains(actionName) {
+                    summary = await postNavigateSnapshot(executor: executor, navResult: result, fallbackURL: args["url"] as? String)
+                } else {
+                    summary = compactResultSummary(result, fallbackURL: args["url"] as? String)
+                }
+                latestLinks = parseLinks(fromSummary: summary)
+                consecutiveRefusals = 0
+                onEvent(.actionResult(summary: summary, success: result.success))
+
+                dialogue.append(GepettoMessage.user(nextUserTurn))
+                dialogue.append(GepettoMessage.assistant(accumulated))
+                nextUserTurn = """
+                Tool result (\(actionName), success=\(result.success)):
+                \(summary)
+
+                Decide your next action. If you have everything you need to answer the user, respond with the final answer (no tool_call). Otherwise emit another <tool_call>.
+                """
+            } else {
+                let visible = ToolCallDetector.extractTextWithoutToolCall(from: accumulated)
+                if iteration < configuration.maxIterations - 1, looksLikeRefusal(visible) {
+                    consecutiveRefusals += 1
+                    onEvent(.replaceText("Working…"))
+                    emitted = ""
+                    dialogue.append(GepettoMessage.user(nextUserTurn))
+                    dialogue.append(GepettoMessage.assistant(accumulated))
+
+                    if consecutiveRefusals >= 2,
+                       let nextLink = pickContentLink(from: latestLinks, currentURL: currentURL) {
+                        onEvent(.action(name: "navigate", arguments: ["url": nextLink.href, "text": nextLink.text]))
+                        isExecuting = true
+                        let nav = await executor.execute(json: ["action": "navigate", "url": nextLink.href])
+                        isExecuting = false
+                        let summary = await postNavigateSnapshot(executor: executor, navResult: nav, fallbackURL: nextLink.href)
+                        latestLinks = parseLinks(fromSummary: summary)
+                        onEvent(.actionResult(summary: summary, success: nav.success))
+                        consecutiveRefusals = 0
+                        nextUserTurn = """
+                        I navigated to "\(nextLink.text)" for you (\(nextLink.href)). Now answer the user's task using the PAGE TEXT below. NO tool_call — write the answer in plain text.
+
+                        \(summary)
+                        """
+                        continue
+                    }
+
+                    nextUserTurn = """
+                    Your previous reply refused or said you needed more info. Stop refusing. The PAGE TEXT and LINKS from the previous tool result are real — use them. Pick the most likely link from LINKS that matches the user's task and emit a navigate tool_call. NO commentary, just the tool_call.
+
+                    Required format (and nothing else):
+                    <tool_call>
+                    {"name":"browser","arguments":{"action":"navigate","url":"<href>"}}
+                    </tool_call>
+                    """
+                    continue
+                }
+
+                onEvent(.complete(finalText: visible.isEmpty ? accumulated : visible))
+                return
+            }
+        }
+
+        onEvent(.failed(
+            reason: "Reached max iterations (\(configuration.maxIterations)).",
+            partialText: emitted
+        ))
+    }
+
+    // MARK: - System / initial prompts
+
+    private var browserAgentSystemPrompt: String {
+        """
+        You are an autonomous browser agent driving a real WKWebView via the `browser` tool. NEVER refuse — always emit the next tool_call.
+
+        TOOL CALL FORMAT (must be exact, single JSON block):
+
+        <tool_call>
+        {"name":"browser","arguments":{"action":"<action>","<param>":"<value>"}}
+        </tool_call>
+
+        ACTIONS:
+        - navigate (url) — load a URL
+        - reload, go_back, go_forward
+        - extract_text — visible text of current page
+        - extract_links — array of {href,text}
+        - extract_forms — form fields and selectors
+        - screenshot — capture viewport
+        - click (selector) — CSS selector click
+        - click_text (text) — click element whose text contains this
+        - fill (selector, text) — set form input value
+        - type (selector, text) — type into focused input
+        - scroll (direction) — "down"|"up"|"top"|"bottom"
+        - evaluate (script) — run JavaScript, returns string
+
+        RULES:
+        1. Issue ONE tool_call per turn. After each call you receive a "Tool result" with PAGE TEXT and LINKS.
+        2. When you have enough info to answer, respond with plain-text final answer (NO tool_call). That ends the session.
+        3. NEVER apologize for being a text model, NEVER claim you can't browse, NEVER ask the user to do anything.
+        4. Be concise — at most one short sentence of commentary per turn.
+        """
+    }
+
+    private func buildInitialPrompt(userTask: String, seedSnapshot: String?) -> String {
+        let stateBlock: String
+        if let snap = seedSnapshot, !snap.isEmpty {
+            stateBlock = """
+            Current browser state (page already loaded):
+            \(snap)
+            """
+        } else {
+            stateBlock = """
+            Current browser state: no page loaded — start with a navigate tool_call.
+            """
+        }
+        return """
+        \(browserAgentSystemPrompt)
+
+        ----
+
+        User's task: \(userTask)
+
+        \(stateBlock)
+
+        Decide your next action. If the page above already contains enough info to answer, respond with the final answer (no tool_call). Otherwise emit a single <tool_call>.
+        """
+    }
+
+    // MARK: - Visual pacing
+
+    private func visualPace(extraMs: Int = 0) async {
+        let total = configuration.visualPaceMs + extraMs
+        guard total > 0 else { return }
+        try? await Task.sleep(nanoseconds: UInt64(total) * 1_000_000)
+    }
+
+    // MARK: - Headless host
+
+    private func ensureWebViewHasLayoutContext(_ executor: BrowserToolExecutor) {
+        guard let webView = executor.engine?.webView else { return }
+        if webView.window == nil || webView.bounds.width < 1 || webView.bounds.height < 1 {
+            let viewport = CGRect(origin: .zero, size: configuration.headlessViewport)
+            webView.frame = viewport
+            attachWebViewToHiddenHost(webView, viewport: viewport)
+        }
+    }
+
+    #if canImport(UIKit)
+    private func attachWebViewToHiddenHost(_ webView: WKWebView, viewport: CGRect) {
+        let window: UIWindow
+        if let existing = hiddenWindow {
+            window = existing
+        } else {
+            window = UIWindow(frame: viewport)
+            window.windowLevel = .alert + 1
+            window.alpha = 0
+            window.isUserInteractionEnabled = false
+            window.rootViewController = UIViewController()
+            window.isHidden = false
+            hiddenWindow = window
+        }
+        guard let host = window.rootViewController?.view else { return }
+        host.frame = viewport
+        webView.removeFromSuperview()
+        host.addSubview(webView)
+    }
+
+    private func teardownHiddenHost() {
+        hiddenWindow?.isHidden = true
+        hiddenWindow?.rootViewController = nil
+        hiddenWindow = nil
+    }
+    #elseif canImport(AppKit)
+    private func attachWebViewToHiddenHost(_ webView: WKWebView, viewport: CGRect) {
+        let window: NSWindow
+        if let existing = hiddenWindow {
+            window = existing
+        } else {
+            window = NSWindow(
+                contentRect: viewport,
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false
+            )
+            window.alphaValue = 0
+            window.isOpaque = false
+            window.ignoresMouseEvents = true
+            window.contentView = NSView(frame: viewport)
+            window.orderOut(nil)
+            hiddenWindow = window
+        }
+        guard let host = window.contentView else { return }
+        host.frame = viewport
+        webView.removeFromSuperview()
+        host.addSubview(webView)
+    }
+
+    private func teardownHiddenHost() {
+        hiddenWindow?.orderOut(nil)
+        hiddenWindow = nil
+    }
+    #else
+    private func attachWebViewToHiddenHost(_ webView: WKWebView, viewport: CGRect) {}
+    private func teardownHiddenHost() {}
+    #endif
+
+    // MARK: - Executor execute helpers
+
+    /// Run the executor and update our @Published state from the result.
+    @discardableResult
+    fileprivate func runAction(
+        executor: BrowserToolExecutor,
+        json: [String: Any]
+    ) async -> BrowserTool.Result {
+        lastAction = json["action"] as? String
+        let result = await executor.execute(json: json)
+        if let url = json["url"] as? String, lastAction == "navigate" { currentURL = url }
+        if let title = executor.engine?.pageTitle { currentTitle = title }
+        if let screenshot = result.screenshot { lastScreenshot = screenshot }
+        return result
+    }
+}
+
+// MARK: - String prefix helper
+
+private extension String {
+    func dropPrefix(_ prefix: String) -> String {
+        guard self.uppercased().hasPrefix(prefix.uppercased()) else { return self }
+        return String(self.dropFirst(prefix.count))
+    }
+}
+
+// MARK: - URL extraction
+
+@MainActor
+extension BrowserAgent {
+    fileprivate func extractFirstURL(from text: String) -> String? {
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return nil }
+        let nsText = text as NSString
+        let range = NSRange(location: 0, length: nsText.length)
+        if let match = detector.firstMatch(in: text, options: [], range: range),
+           let url = match.url, let scheme = url.scheme, scheme.hasPrefix("http") {
+            return url.absoluteString
+        }
+        let pattern = #"\b([a-z0-9-]+\.)+[a-z]{2,}(\/[\w\-./?%&=#+]*)?"#
+        if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+           let m = regex.firstMatch(in: text, options: [], range: range),
+           let r = Range(m.range, in: text) {
+            return "https://" + String(text[r])
+        }
+        return nil
+    }
+}

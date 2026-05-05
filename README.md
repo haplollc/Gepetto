@@ -30,6 +30,7 @@ Gepetto provides **programmatic control** over a WKWebView-based browser, enabli
 | 📄 **Extraction** | Get text, HTML, all links, form fields |
 | ⏳ **Waiting** | Wait for elements, text, or navigation to complete |
 | 🤖 **AI Ready** | JSON schema for LLM function calling |
+| 🧠 **Agent SDK** | Plug-and-play `BrowserAgent` with multi-stage automation, AI validation, and form-fill takeover — bring your own model via the `GepettoAIEngine` protocol |
 | 🎨 **SwiftUI** | Drop-in views, sheets, and modifiers |
 
 ---
@@ -56,7 +57,76 @@ dependencies: [
 
 ## 🚀 Quick Start
 
-### For AI Agents (Tool Executor)
+### Highest level: `BrowserAgent` (LLM-driven, multi-step)
+
+The fastest way to get a real browser agent in your app. `BrowserAgent` runs a full multi-step automation loop on top of any AI backend — your local model, Apple Foundation Models, OpenAI, Anthropic, anything that can stream a text completion. You implement one tiny adapter, then call `run(task:)` with a natural-language instruction.
+
+```swift
+import Gepetto
+
+// 1. Implement GepettoAIEngine for your model of choice.
+final class MyEngine: GepettoAIEngine, @unchecked Sendable {
+    func stream(messages: [GepettoMessage], systemPrompt: String?) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            Task {
+                // Call your LLM (OpenAI, local Llama, Foundation Models, etc.)
+                // and yield each text chunk:
+                continuation.yield("Hello ")
+                continuation.yield("world")
+                continuation.finish()
+            }
+        }
+    }
+}
+
+// 2. Boot the agent and run a task.
+let agent = BrowserAgent()       // headless WKWebView is set up automatically
+let engine = MyEngine()
+
+await agent.run(
+    task: """
+    Go to https://news.ycombinator.com, click into the top story, \
+    and tell me what it's about in one sentence.
+    """,
+    engine: engine
+) { event in
+    switch event {
+    case .textChunk(let s):       print(s, terminator: "")
+    case .action(let name, _):    print("\n[\(name)]")
+    case .actionResult:           break
+    case .validation(let i, let ok, let why):
+        print("\n[stage \(i + 1) validation: \(ok ? "OK" : "FAIL") — \(why)]")
+    case .complete(let final):    print("\n\(final)")
+    case .failed(let reason, _):  print("\n❌ \(reason)")
+    case .replaceText(let t):     print("\n[clear → \(t)]")
+    }
+}
+```
+
+What you get out of the box:
+
+- **Multi-stage automation**: a single prompt with multiple URLs becomes an ordered chain of `(URL → form-fill → submit)` stages, each driven deterministically.
+- **Per-stage AI validation**: after every stage, the agent asks your engine *"did this step actually succeed?"* and aborts cleanly on failure (catches login errors, validation messages, 404s) instead of plowing through bad state.
+- **Form-fill takeover**: when your prompt says *"type X into the username field"*, Gepetto runs `extract_forms`, matches selectors heuristically (by `name` / `type` / `placeholder`), and fills them — even if the AI fumbles selectors.
+- **Refusal recovery**: weak local models that say *"I can't browse"* get nudged once, then deterministically driven to a content link from the page on the second try.
+- **Live `WKWebView`**: `agent.executor?.engine?.webView` is the actual driving webview. Drop it into a SwiftUI `UIViewRepresentable` to show automation in real time.
+
+```swift
+agent.configuration = BrowserAgentConfiguration(
+    maxIterations: 8,         // loop cap
+    validateEachStage: true,  // ask the AI to validate each stage's outcome
+    visualPaceMs: 800,        // ms pause between actions so UI updates are visible
+    headlessViewport: CGSize(width: 1024, height: 1366)
+)
+```
+
+See [HaploAI iOS](https://github.com/haplollc/HaploAI_iOS) for the on-device LLM adapter (`LocalLLMEngineAdapter`) — a complete real-world example.
+
+---
+
+### Lower level: `BrowserToolExecutor` (single-action, no AI)
+
+The same primitive `BrowserAgent` uses internally. Reach for this when you want to drive the browser yourself without an LLM in the loop — your own deterministic scripts, MCP tool dispatch, function-calling backends, etc.
 
 ```swift
 import Gepetto
