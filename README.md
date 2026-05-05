@@ -315,6 +315,57 @@ class WebResearchAgent {
 
 ---
 
+## 🌍 Real-World Usage
+
+Gepetto powers the in-chat browser agent in **[HaploAI iOS](https://github.com/haplollc/HaploAI_iOS)** — a fully on-device AI assistant where the local LLM drives a live `WKWebView` to navigate, click, fill forms, and extract content for the user. The integration showcases a battle-tested pattern for shipping browser automation in production:
+
+- **Inline live panel** — the actual `WKWebView` Gepetto is driving renders right above the chat input, so the user watches automation happen in real time.
+- **Multi-step agent loop** — the LLM emits `<tool_call>` blocks, results are fed back into the next iteration, until a final natural-language answer.
+- **Deterministic form-fill takeover** — when the LLM fumbles selectors, the wrapper extracts real fields via `extract_forms` and fills them by name/type heuristics so a weak local model can still complete a form and click submit.
+- **Auto-content-click** — when the user says *"click into the top story"*, the wrapper picks the first external link from the latest snapshot and navigates deterministically.
+
+See [HaploAI iOS](https://github.com/haplollc/HaploAI_iOS) for the full agent runner, the live SwiftUI panel, and integration tests.
+
+---
+
+## 🪟 Headless / Agent-Driven Usage
+
+When Gepetto is driven from an agent loop (no user-visible UI), the `WKWebView` ends up offscreen with `frame: .zero` and never gets attached to a window. WebKit needs a non-zero layout context for several APIs to work correctly:
+
+- `document.body.innerText` returns `""` when there's no rendered layout.
+- `WKWebView.takeSnapshot` produces a zero-size image that fails PNG encoding.
+- `evaluateJavaScript` works fine, but anything depending on rendered geometry (clientWidth, etc.) won't.
+
+**Two recommended fixes** (use either):
+
+1. **Park the webview in a hidden window** with a real viewport so it actually lays out:
+
+   ```swift
+   let executor = BrowserToolExecutor()
+   executor.start()
+   if let webView = executor.engine?.webView {
+       webView.frame = CGRect(x: 0, y: 0, width: 1024, height: 1366)
+       #if os(iOS)
+       let window = UIWindow(frame: webView.frame)
+       window.alpha = 0
+       window.isUserInteractionEnabled = false
+       window.rootViewController = UIViewController()
+       window.rootViewController?.view.addSubview(webView)
+       window.isHidden = false
+       #elseif os(macOS)
+       let window = NSWindow(contentRect: webView.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+       window.alphaValue = 0
+       window.contentView?.addSubview(webView)
+       #endif
+   }
+   ```
+
+2. **Use `extractText` directly** — as of v1.0.1 the engine falls back to `document.body.textContent` when `innerText` returns empty, so headless extraction works even without a layout context. Note `textContent` returns *all* text including hidden elements, which is usually preferable for LLM consumption anyway.
+
+Both approaches can be combined for maximum reliability.
+
+---
+
 ## 🧪 Testing
 
 ```bash
