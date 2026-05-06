@@ -31,6 +31,93 @@ import UIKit
 import AppKit
 #endif
 
+// MARK: - Agent phases
+
+/// Coarse-grained activity the agent is performing right now. SwiftUI views
+/// bind to `BrowserAgent.currentPhase` so the user always knows *what* the
+/// agent is doing — thinking, reading, typing, validating, etc.
+public enum AgentPhase: Sendable, Equatable {
+    case idle
+    case starting
+    case navigating(url: String)
+    case readingPage
+    case thinking          // waiting on the AI stream
+    case typing(field: String, value: String)
+    case clicking(target: String)
+    case scrolling(direction: String)
+    case submitting
+    case extracting        // extract_text / extract_links / extract_forms
+    case takingScreenshot
+    case runningJS
+    case validating
+    case recovering(attempt: Int)
+    case summarizing       // streaming the final answer
+    case finished
+    case failed(String)
+
+    public var label: String {
+        switch self {
+        case .idle:                       return "Idle"
+        case .starting:                   return "Starting…"
+        case .navigating(let url):        return "Loading \(prettyHost(url))"
+        case .readingPage:                return "Reading page…"
+        case .thinking:                   return "Thinking…"
+        case .typing(let field, _):       return "Typing \(field)…"
+        case .clicking(let target):       return "Clicking \(target.prefix(40))…"
+        case .scrolling(let dir):         return "Scrolling \(dir)…"
+        case .submitting:                 return "Submitting…"
+        case .extracting:                 return "Extracting…"
+        case .takingScreenshot:           return "Capturing…"
+        case .runningJS:                  return "Running JS…"
+        case .validating:                 return "Checking result…"
+        case .recovering(let n):          return "Trying a fix… (attempt \(n))"
+        case .summarizing:                return "Writing answer…"
+        case .finished:                   return "Done"
+        case .failed(let reason):         return "Failed: \(reason.prefix(60))"
+        }
+    }
+
+    public var detail: String? {
+        switch self {
+        case .navigating(let url):     return url
+        case .typing(_, let value):    return String(value.prefix(60))
+        case .clicking(let target):    return target
+        case .scrolling(let dir):      return dir
+        case .recovering:              return "asking the AI for a corrective action"
+        case .thinking, .summarizing:  return "waiting on AI response"
+        case .readingPage, .extracting: return "running JS in the page"
+        case .validating:              return "asking the AI to verify the page"
+        default:                       return nil
+        }
+    }
+
+    public var symbol: String {
+        switch self {
+        case .idle, .finished:    return "circle"
+        case .starting:           return "power"
+        case .navigating:         return "arrow.up.right.square"
+        case .readingPage:        return "doc.plaintext"
+        case .thinking:           return "brain"
+        case .typing:             return "keyboard"
+        case .clicking:           return "hand.tap"
+        case .scrolling:          return "arrow.up.and.down"
+        case .submitting:         return "paperplane"
+        case .extracting:         return "list.bullet.rectangle"
+        case .takingScreenshot:   return "camera"
+        case .runningJS:          return "curlybraces"
+        case .validating:         return "checkmark.seal"
+        case .recovering:         return "arrow.triangle.2.circlepath"
+        case .summarizing:        return "text.bubble"
+        case .failed:             return "exclamationmark.triangle"
+        }
+    }
+
+    private func prettyHost(_ url: String) -> String {
+        guard let u = URL(string: url), let host = u.host else { return url }
+        return host.replacingOccurrences(of: "www.", with: "")
+    }
+}
+
 // MARK: - Public events
 
 public enum BrowserAgentEvent: Sendable {
@@ -83,7 +170,7 @@ public struct BrowserAgentConfiguration: Sendable {
     public init(
         maxIterations: Int = 8,
         validateEachStage: Bool = true,
-        visualPaceMs: Int = 1500,
+        visualPaceMs: Int = 700,
         headlessViewport: CGSize = CGSize(width: 1024, height: 1366),
         maxStageRecoveries: Int = 2
     ) {
@@ -121,6 +208,11 @@ public final class BrowserAgent: ObservableObject {
     /// (refusal nudge, validation retry, "auto-following into top story",
     /// etc.). Hidden by default, surfaced for debugging UX.
     @Published public internal(set) var lastActionReason: String?
+
+    /// Coarse-grained activity the agent is doing RIGHT NOW. SwiftUI views
+    /// should show this prominently so the user always knows the agent is
+    /// alive and what step it's on.
+    @Published public internal(set) var currentPhase: AgentPhase = .idle
 
     // ---- Internals --------------------------------------------------------
 
@@ -171,15 +263,47 @@ public final class BrowserAgent: ObservableObject {
         lastAction = nil
         lastActionTarget = nil
         lastActionReason = nil
+        currentPhase = .idle
         isExecuting = false
     }
 
     /// Publish the current tool call so SwiftUI panels can render a status
-    /// capsule without parsing arg dictionaries themselves.
+    /// capsule without parsing arg dictionaries themselves. Also derives the
+    /// agent's coarse `currentPhase` from the action so views always have a
+    /// human-readable label of what the agent is doing right now.
     func publishAction(name: String, arguments: [String: Any], reason: String? = nil) {
         lastAction = name
         lastActionTarget = humanTarget(name: name, arguments: arguments)
         lastActionReason = reason
+        currentPhase = phaseFromAction(name: name, arguments: arguments)
+    }
+
+    private func phaseFromAction(name: String, arguments: [String: Any]) -> AgentPhase {
+        switch name {
+        case "navigate":
+            return .navigating(url: (arguments["url"] as? String) ?? "")
+        case "click", "click_text":
+            let target = (arguments["text"] as? String) ?? (arguments["selector"] as? String) ?? ""
+            return .clicking(target: target)
+        case "fill", "type":
+            let field = (arguments["field"] as? String) ?? (arguments["selector"] as? String) ?? ""
+            let value = (arguments["text"] as? String) ?? ""
+            return .typing(field: field, value: value)
+        case "scroll":
+            return .scrolling(direction: (arguments["direction"] as? String) ?? "down")
+        case "submit":
+            return .submitting
+        case "extract_text", "extract_links", "extract_forms":
+            return .extracting
+        case "screenshot":
+            return .takingScreenshot
+        case "evaluate":
+            return .runningJS
+        case "go_back", "go_forward", "reload":
+            return .navigating(url: currentURL ?? "")
+        default:
+            return currentPhase
+        }
     }
 
     private func humanTarget(name: String, arguments: [String: Any]) -> String? {
@@ -215,9 +339,11 @@ public final class BrowserAgent: ObservableObject {
         onEvent: @escaping (BrowserAgentEvent) -> Void
     ) async {
         print("🎭 [gepetto] BrowserAgent.run() ENTRY — task='\(task.prefix(120))…' history=\(history.count) maxIters=\(configuration.maxIterations)")
+        currentPhase = .starting
         if executor == nil { start() }
         guard let executor = executor else {
             print("❌ [gepetto] run(): executor unavailable")
+            currentPhase = .failed("session unavailable")
             onEvent(.failed(reason: "Browser session unavailable.", partialText: ""))
             return
         }
@@ -294,6 +420,7 @@ public final class BrowserAgent: ObservableObject {
             // button, navigate elsewhere) and retry up to maxStageRecoveries
             // times before truly giving up.
             if configuration.validateEachStage {
+                currentPhase = .validating
                 var validation = await validateStage(
                     stageIndex: i, stage: stage, snapshot: lastSnapshot,
                     userTask: userTask, engine: engine
@@ -303,6 +430,7 @@ public final class BrowserAgent: ObservableObject {
                 var recoveryAttempts = 0
                 while !validation.success, recoveryAttempts < configuration.maxStageRecoveries {
                     recoveryAttempts += 1
+                    currentPhase = .recovering(attempt: recoveryAttempts)
                     print("🎭 [gepetto] stage \(i + 1) failed validation (attempt #\(recoveryAttempts)/\(configuration.maxStageRecoveries)) — \(validation.reason)")
 
                     let recovery = await askForRecovery(
@@ -559,6 +687,7 @@ public final class BrowserAgent: ObservableObject {
         finalSnapshot: String,
         onEvent: @escaping (BrowserAgentEvent) -> Void
     ) async {
+        currentPhase = .summarizing
         let summaryPrompt = """
         I just executed a multi-step browser automation for you. Here is the FINAL page state:
 
@@ -583,12 +712,14 @@ public final class BrowserAgent: ObservableObject {
                 }
             }
         } catch {
+            currentPhase = .failed("summary stream failed")
             onEvent(.failed(
                 reason: "Summary stream failed: \(error.localizedDescription)",
                 partialText: emitted
             ))
             return
         }
+        currentPhase = .finished
         onEvent(.complete(finalText: emitted.isEmpty ? "Automation completed." : emitted))
     }
 
@@ -666,6 +797,7 @@ public final class BrowserAgent: ObservableObject {
             print("🎭 [gepetto] ===== iter \(iteration + 1)/\(configuration.maxIterations) =====")
             print("🎭 [gepetto] prompt preview: \(nextUserTurn.prefix(160).replacingOccurrences(of: "\n", with: " ⏎ "))…")
             var accumulated = ""
+            currentPhase = .thinking
             do {
                 let messages = dialogue + [GepettoMessage.user(nextUserTurn)]
                 for try await chunk in engine.stream(messages: messages, systemPrompt: nil) {
@@ -678,6 +810,7 @@ public final class BrowserAgent: ObservableObject {
                     }
                 }
             } catch {
+                currentPhase = .failed("AI stream error")
                 onEvent(.failed(
                     reason: "AI stream failed: \(error.localizedDescription)",
                     partialText: emitted
@@ -754,11 +887,13 @@ public final class BrowserAgent: ObservableObject {
                     continue
                 }
 
+                currentPhase = .finished
                 onEvent(.complete(finalText: visible.isEmpty ? accumulated : visible))
                 return
             }
         }
 
+        currentPhase = .failed("hit max iterations")
         onEvent(.failed(
             reason: "Reached max iterations (\(configuration.maxIterations)).",
             partialText: emitted

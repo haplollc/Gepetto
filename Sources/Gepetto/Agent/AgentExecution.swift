@@ -262,13 +262,17 @@ extension BrowserAgent {
     // MARK: - Post-action snapshot
 
     /// After a navigation/click, fetch text + links so the agent (and the AI
-    /// validator) has the page content. Polls extract_text to handle pages
-    /// that haven't fully painted yet.
+    /// validator) has the page content. Optimized for speed:
+    ///   - extract_text and extract_links run concurrently via `async let`,
+    ///     not serially — saves ~the entire round-trip of the slower one.
+    ///   - extract_text bails after at most 3 quick (350ms) polls; the first
+    ///     non-empty result wins.
     func postNavigateSnapshot(
         executor: BrowserToolExecutor,
         navResult: BrowserTool.Result,
         fallbackURL: String?
     ) async -> String {
+        currentPhase = .readingPage
         var lines: [String] = []
         let url = currentURL ?? fallbackURL ?? "(unknown)"
         let title = currentTitle ?? executor.engine?.pageTitle ?? "(unknown)"
@@ -278,20 +282,14 @@ extension BrowserAgent {
         if let msg = navResult.message, !msg.isEmpty { lines.append(msg) }
         if let err = navResult.error, !err.isEmpty { lines.append("Error: \(err)") }
 
-        var pageText = ""
-        for attempt in 0..<5 {
-            if attempt > 0 { try? await Task.sleep(nanoseconds: 500_000_000) }
-            let r = await executor.execute(json: ["action": "extract_text"])
-            if let s = r.data, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                pageText = s
-                break
-            }
-        }
+        // Run extract_text (with quick poll) and extract_links concurrently.
+        async let pageTextTask = pollExtractText(executor: executor, attempts: 3, intervalMs: 350)
+        async let linksTask = executor.execute(json: ["action": "extract_links"])
+        let (pageText, linksResult) = await (pageTextTask, linksTask)
+
         if !pageText.isEmpty {
             lines.append("PAGE TEXT (truncated):\n\(truncate(collapseWhitespace(pageText), max: 1800))")
         }
-
-        let linksResult = await executor.execute(json: ["action": "extract_links"])
         if let links = linksResult.links, !links.isEmpty {
             let preview = links.prefix(20).map { l in
                 "- \(truncate(l.text, max: 80)) → \(l.href)"
@@ -300,8 +298,20 @@ extension BrowserAgent {
         }
 
         if let screenshot = navResult.screenshot { lastScreenshot = screenshot }
-
         return lines.joined(separator: "\n")
+    }
+
+    private func pollExtractText(executor: BrowserToolExecutor, attempts: Int, intervalMs: Int) async -> String {
+        for attempt in 0..<attempts {
+            if attempt > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(intervalMs) * 1_000_000)
+            }
+            let r = await executor.execute(json: ["action": "extract_text"])
+            if let s = r.data, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return s
+            }
+        }
+        return ""
     }
 
     /// One-action result summary (when `postNavigateSnapshot` would be
