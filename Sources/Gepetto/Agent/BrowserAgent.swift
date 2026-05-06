@@ -100,6 +100,16 @@ public final class BrowserAgent: ObservableObject {
     @Published public internal(set) var lastScreenshot: Data?
     @Published public internal(set) var lastAction: String?
 
+    /// Human-readable target of the last action (URL, selector, search query
+    /// text) — populated alongside `lastAction` so SwiftUI views can render
+    /// "what was clicked / where we navigated" without parsing arg dicts.
+    @Published public internal(set) var lastActionTarget: String?
+
+    /// Optional one-line explanation of why the agent took the last action
+    /// (refusal nudge, validation retry, "auto-following into top story",
+    /// etc.). Hidden by default, surfaced for debugging UX.
+    @Published public internal(set) var lastActionReason: String?
+
     // ---- Internals --------------------------------------------------------
 
     public var configuration: BrowserAgentConfiguration
@@ -147,7 +157,34 @@ public final class BrowserAgent: ObservableObject {
         currentTitle = nil
         lastScreenshot = nil
         lastAction = nil
+        lastActionTarget = nil
+        lastActionReason = nil
         isExecuting = false
+    }
+
+    /// Publish the current tool call so SwiftUI panels can render a status
+    /// capsule without parsing arg dictionaries themselves.
+    func publishAction(name: String, arguments: [String: Any], reason: String? = nil) {
+        lastAction = name
+        lastActionTarget = humanTarget(name: name, arguments: arguments)
+        lastActionReason = reason
+    }
+
+    private func humanTarget(name: String, arguments: [String: Any]) -> String? {
+        if let url = arguments["url"] as? String, !url.isEmpty { return url }
+        if let text = arguments["text"] as? String, !text.isEmpty {
+            // For fill/type — show "field: value" preview.
+            if name == "fill" || name == "type", let field = arguments["field"] as? String, !field.isEmpty {
+                return "\(field): \(text.prefix(40))"
+            }
+            return String(text.prefix(60))
+        }
+        if let selector = arguments["selector"] as? String, !selector.isEmpty { return selector }
+        if let direction = arguments["direction"] as? String, !direction.isEmpty { return direction }
+        if let script = arguments["script"] as? String, !script.isEmpty {
+            return String(script.prefix(40)).replacingOccurrences(of: "\n", with: " ")
+        }
+        return nil
     }
 
     /// Run the agent against a natural-language task. The AI engine is
@@ -165,16 +202,17 @@ public final class BrowserAgent: ObservableObject {
         engine: GepettoAIEngine,
         onEvent: @escaping (BrowserAgentEvent) -> Void
     ) async {
+        print("🎭 [gepetto] BrowserAgent.run() ENTRY — task='\(task.prefix(120))…' history=\(history.count) maxIters=\(configuration.maxIterations)")
         if executor == nil { start() }
         guard let executor = executor else {
+            print("❌ [gepetto] run(): executor unavailable")
             onEvent(.failed(reason: "Browser session unavailable.", partialText: ""))
             return
         }
 
-        // 0. Multi-stage scripted automation: if the prompt references >=2
-        //    URLs, drive the chain deterministically and only ask the AI for
-        //    a final summary (and per-stage validation if enabled).
         if let script = parseAutomationScript(task) {
+            print("🎭 [gepetto] run(): multi-stage script detected, \(script.count) stages")
+            for (i, stage) in script.enumerated() { print("🎭 [gepetto]   stage \(i + 1): \(stage)") }
             await runScriptedFlow(
                 script: script,
                 executor: executor,
@@ -186,7 +224,7 @@ public final class BrowserAgent: ObservableObject {
             return
         }
 
-        // 1. Single-stage free-form agent loop.
+        print("🎭 [gepetto] run(): single-stage free-form path")
         await runFreeformAgent(
             task: task,
             executor: executor,
@@ -208,13 +246,17 @@ public final class BrowserAgent: ObservableObject {
     ) async {
         var lastSnapshot = ""
         for (i, stage) in script.enumerated() {
+            print("🎭 [gepetto] runScriptedFlow: stage \(i + 1)/\(script.count) → \(stage.url)")
             ensureWebViewHasLayoutContext(executor)
+
+            publishAction(name: "navigate", arguments: ["url": stage.url])
 
             onEvent(.action(name: "navigate", arguments: ["url": stage.url]))
             isExecuting = true
             let nav = await executor.execute(json: ["action": "navigate", "url": stage.url])
             let success = nav.success
             isExecuting = false
+            print("🎭 [gepetto]   stage \(i + 1) navigate success=\(success)")
             lastSnapshot = await postNavigateSnapshot(executor: executor, navResult: nav, fallbackURL: stage.url)
             onEvent(.actionResult(summary: lastSnapshot, success: success))
 
@@ -375,6 +417,7 @@ public final class BrowserAgent: ObservableObject {
         let seedURL = extractFirstURL(from: task)
         if let url = seedURL {
             ensureWebViewHasLayoutContext(executor)
+            publishAction(name: "navigate", arguments: ["url": url])
             onEvent(.action(name: "navigate", arguments: ["url": url]))
             isExecuting = true
             let nav = await executor.execute(json: ["action": "navigate", "url": url])
@@ -401,6 +444,7 @@ public final class BrowserAgent: ObservableObject {
             if !didAutoFollowUp, nav.success, taskWantsContentClick(task) {
                 let links = parseLinks(fromSummary: snap)
                 if let target = pickContentLink(from: links, currentURL: currentURL) {
+                    publishAction(name: "navigate", arguments: ["url": target.href, "text": target.text])
                     onEvent(.action(name: "navigate", arguments: ["url": target.href, "text": target.text]))
                     isExecuting = true
                     let nav2 = await executor.execute(json: ["action": "navigate", "url": target.href])
@@ -428,6 +472,8 @@ public final class BrowserAgent: ObservableObject {
         var latestLinks = parseLinks(fromSummary: seedSnapshot)
 
         for iteration in 0..<configuration.maxIterations {
+            print("🎭 [gepetto] ===== iter \(iteration + 1)/\(configuration.maxIterations) =====")
+            print("🎭 [gepetto] prompt preview: \(nextUserTurn.prefix(160).replacingOccurrences(of: "\n", with: " ⏎ "))…")
             var accumulated = ""
             do {
                 let messages = dialogue + [GepettoMessage.user(nextUserTurn)]
@@ -448,10 +494,13 @@ public final class BrowserAgent: ObservableObject {
                 return
             }
 
+            print("🎭 [gepetto] iter \(iteration + 1) LLM output (\(accumulated.count) chars): \(accumulated.prefix(400))")
+
             if let toolCall = ToolCallDetector.detectToolCall(in: accumulated),
                toolCall.name.lowercased() == "browser" {
                 let args = toolCall.arguments
                 let actionName = (args["action"] as? String) ?? "?"
+                print("🎭 [gepetto] iter \(iteration + 1) tool_call: \(actionName) args=\(args)")
                 onEvent(.action(name: actionName, arguments: args))
                 isExecuting = true
                 let result = await executor.execute(json: args)
@@ -478,6 +527,7 @@ public final class BrowserAgent: ObservableObject {
                 let visible = ToolCallDetector.extractTextWithoutToolCall(from: accumulated)
                 if iteration < configuration.maxIterations - 1, looksLikeRefusal(visible) {
                     consecutiveRefusals += 1
+                    print("🎭 [gepetto] iter \(iteration + 1) refusal #\(consecutiveRefusals) — visible: \(visible.prefix(160))")
                     onEvent(.replaceText("Working…"))
                     emitted = ""
                     dialogue.append(GepettoMessage.user(nextUserTurn))
@@ -485,6 +535,7 @@ public final class BrowserAgent: ObservableObject {
 
                     if consecutiveRefusals >= 2,
                        let nextLink = pickContentLink(from: latestLinks, currentURL: currentURL) {
+                        publishAction(name: "navigate", arguments: ["url": nextLink.href, "text": nextLink.text])
                         onEvent(.action(name: "navigate", arguments: ["url": nextLink.href, "text": nextLink.text]))
                         isExecuting = true
                         let nav = await executor.execute(json: ["action": "navigate", "url": nextLink.href])

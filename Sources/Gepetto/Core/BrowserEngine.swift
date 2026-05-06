@@ -449,23 +449,101 @@ public final class BrowserEngine: NSObject, ObservableObject {
     public func clickText(_ text: String, tag: String? = nil) async throws {
         isExecutingAction = true
         defer { isExecutingAction = false }
-        
-        let tagFilter = tag.map { "el.tagName.toLowerCase() === '\($0.lowercased())' && " } ?? ""
-        
+
+        let tagFilter = tag.map { "'\($0.lowercased())'" } ?? "null"
+
+        // Selecting `*` and matching `innerText.includes(...)` is a footgun:
+        // body/html contain the entire page text so they always "match" first
+        // and `body.click()` silently does nothing. We instead:
+        //   1. Restrict to interactive elements (a, button, [role=button],
+        //      [onclick], input[type=submit|button], [tabindex]) plus any
+        //      explicit `tag` the caller passed in.
+        //   2. Prefer EXACT label match over substring.
+        //   3. Among substring matches, prefer the element with the SHORTEST
+        //      text (the leaf-most label, not its container).
+        //   4. Fall back to a substring scan over `*` only when no
+        //      interactive element matched.
         let js = """
         (function() {
-            const elements = Array.from(document.querySelectorAll('*'));
-            const target = elements.find(el => 
-                \(tagFilter)el.innerText.trim().toLowerCase().includes('\(escapeJS(text.lowercased()))')
-            );
-            if (!target) return { success: false, error: 'No element with text found' };
-            target.click();
-            return { success: true };
+            var needle = '\(escapeJS(text.lowercased()))';
+            var tagFilter = \(tagFilter);
+
+            function elText(el) {
+                // Prefer aria-label / value / title where present so
+                // <input type=submit value="Login"> matches "login".
+                var t = (el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title'))) || '';
+                if (!t && el.value) t = el.value;
+                if (!t) t = el.innerText || el.textContent || '';
+                return t.trim();
+            }
+
+            var interactiveSel =
+                'a[href], button, [role="button"], [role="link"], ' +
+                'input[type="submit"], input[type="button"], input[type="image"], ' +
+                '[onclick], [tabindex]';
+            var candidates = Array.from(document.querySelectorAll(interactiveSel))
+                .filter(function (el) {
+                    if (tagFilter && el.tagName.toLowerCase() !== tagFilter) return false;
+                    if (el.disabled) return false;
+                    // Skip elements that aren't visible / are zero-size.
+                    var rect = el.getBoundingClientRect();
+                    if (rect.width === 0 && rect.height === 0) return false;
+                    var s = window.getComputedStyle(el);
+                    if (s.visibility === 'hidden' || s.display === 'none') return false;
+                    return true;
+                });
+
+            // 1. Exact match (case-insensitive).
+            var exact = candidates.find(function (el) {
+                return elText(el).toLowerCase() === needle;
+            });
+            if (exact) { exact.click(); return { success: true, matched: 'exact', tag: exact.tagName }; }
+
+            // 2. Substring match — prefer shortest text (most specific element).
+            var subs = candidates
+                .map(function (el) { return { el: el, text: elText(el).toLowerCase() }; })
+                .filter(function (x) { return x.text.indexOf(needle) !== -1; })
+                .sort(function (a, b) { return a.text.length - b.text.length; });
+            if (subs.length > 0) {
+                subs[0].el.click();
+                return { success: true, matched: 'substring', tag: subs[0].el.tagName, text: subs[0].text };
+            }
+
+            // 3. Last resort — scan all elements but return only LEAF elements
+            // (no children) so we don't click <body> by accident.
+            var leaves = Array.from(document.querySelectorAll('*'))
+                .filter(function (el) {
+                    if (tagFilter && el.tagName.toLowerCase() !== tagFilter) return false;
+                    if (el.children.length > 0) return false;
+                    var t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    return t.indexOf(needle) !== -1;
+                })
+                .sort(function (a, b) {
+                    return (a.innerText || '').length - (b.innerText || '').length;
+                });
+            if (leaves.length > 0) {
+                // Walk up to the nearest clickable ancestor so the click
+                // actually triggers something (e.g. a <span>logout</span>
+                // inside <a href="logout">).
+                var t = leaves[0];
+                var p = t;
+                while (p && p !== document.body) {
+                    if (p.tagName === 'A' || p.tagName === 'BUTTON' || p.getAttribute('role') === 'button' || p.getAttribute('onclick')) {
+                        p.click();
+                        return { success: true, matched: 'leaf-ancestor', tag: p.tagName };
+                    }
+                    p = p.parentElement;
+                }
+                t.click();
+                return { success: true, matched: 'leaf', tag: t.tagName };
+            }
+
+            return { success: false, error: 'No clickable element with text "' + needle + '" found' };
         })()
         """
-        
+
         let result = try await evaluateJavaScript(js) as? [String: Any]
-        
+
         if result?["success"] as? Bool != true {
             let error = result?["error"] as? String ?? "Click failed"
             throw BrowserError.elementNotFound("text=\(text)", error)

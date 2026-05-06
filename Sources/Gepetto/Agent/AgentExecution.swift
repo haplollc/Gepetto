@@ -53,6 +53,7 @@ extension BrowserAgent {
 
         if plan.shouldSubmit {
             try? await Task.sleep(nanoseconds: 500_000_000)
+            publishAction(name: "submit", arguments: ["via": "form_scoped_submit"])
             onEvent(.action(name: "submit", arguments: ["via": "form_scoped_submit"]))
             isExecuting = true
             _ = await executor.execute(json: [
