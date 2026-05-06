@@ -35,7 +35,7 @@ extension BrowserAgent {
         var firstFilledSelector: String? = nil
         for pair in plan.values {
             guard let pick = matchField(hint: pair.fieldHint, value: pair.value, fields: fields, exclude: alreadyUsed) else {
-                print("⚠️ [Gepetto] no field matched hint='\(pair.fieldHint)' for value='\(pair.value.prefix(8))…'")
+                print("⚠️ [gepetto] no field matched hint='\(pair.fieldHint)' for value='\(pair.value.prefix(8))…'")
                 continue
             }
             alreadyUsed.insert(pick.selector)
@@ -99,13 +99,13 @@ extension BrowserAgent {
         ])
         let actual = readback.data ?? ""
         if actual == value {
-            print("✅ [Gepetto] fill verified: \(selector) = \(value.prefix(8))…")
+            print("✅ [gepetto] fill verified: \(selector) = \(value.prefix(8))…")
             return
         }
 
         // Mismatch — retry with `type` (focus + per-character keystrokes).
         // First clear, then type.
-        print("⚠️ [Gepetto] fill verification FAILED for \(selector). expected=\(value.prefix(12)) got='\(actual.prefix(12))'. Retrying with type().")
+        print("⚠️ [gepetto] fill verification FAILED for \(selector). expected=\(value.prefix(12)) got='\(actual.prefix(12))'. Retrying with type().")
         _ = await executor.execute(json: [
             "action": "evaluate",
             "script": "(function(){var e=document.querySelector(\(jsString(selector)));if(e){e.value='';e.focus();}return 'cleared';})();"
@@ -123,9 +123,9 @@ extension BrowserAgent {
         ])
         let actual2 = readback2.data ?? ""
         if actual2 == value {
-            print("✅ [Gepetto] type() retry succeeded: \(selector)")
+            print("✅ [gepetto] type() retry succeeded: \(selector)")
         } else {
-            print("❌ [Gepetto] still couldn't fill \(selector) after type() retry. expected=\(value.prefix(12)) got='\(actual2.prefix(12))'")
+            print("❌ [gepetto] still couldn't fill \(selector) after type() retry. expected=\(value.prefix(12)) got='\(actual2.prefix(12))'")
         }
     }
 
