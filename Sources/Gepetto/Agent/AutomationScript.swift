@@ -80,21 +80,36 @@ extension BrowserAgent {
 
     /// Parse natural-language phrasings like:
     ///   - type "X" into the username field
-    ///   - and "Y" into the password field
+    ///   - typing "X" into the username field   (gerund forms)
+    ///   - and "Y" into the password field      (chained connector)
     ///   - fill the email with "Z"
     ///   - search for "Q"
-    /// into an ordered FormFillPlan.
-    func parseFormFillIntent(_ task: String) -> FormFillPlan? {
+    /// into an ordered FormFillPlan. Public so SDK consumers can inspect the
+    /// parsed plan before running the agent and tests can pin the behavior.
+    public func parseFormFillIntent(_ task: String) -> FormFillPlan? {
         let lower = task.lowercased()
         let submitVerbs = ["click", "submit", "press", "hit", "log in", "login", "search"]
         let shouldSubmit = submitVerbs.contains { lower.contains($0) }
 
+        // Verbs we recognize as "the user wants this value typed into FIELD".
+        // We accept the bare verb AND its gerund/-ing form so phrasings like
+        // "by typing X into ..." or "entering Y in ..." also match — local
+        // LLMs and humans both naturally use gerunds and a regex pinned to
+        // exact verb forms silently drops half the pairs (which is exactly
+        // how the HN login bug snuck in).
+        let typingVerbs = "(?:type|typing|enter|entering|use|using|input|inputting|put|putting|paste|pasting|write|writing)"
         var pairs: [(String, String)] = []
         let patterns = [
-            #"(?:type|enter|use)\s+["“”']([^"”“']+)["“”']\s+(?:into|in|as|for)\s+(?:the\s+)?(\w+)"#,
-            #"and\s+["“”']([^"”“']+)["“”']\s+(?:into|in|as|for)\s+(?:the\s+)?(\w+)"#,
-            #"fill\s+(?:in\s+)?(?:the\s+)?(\w+)\s+(?:field\s+)?(?:with|using)\s+["“”']([^"”“']+)["“”']"#,
-            #"search\s+(?:for\s+)?["“”']([^"”“']+)["“”']"#
+            // <verb> "VALUE" (?:into|in|as|for) (the)? FIELD
+            #"\#(typingVerbs)\s+["“”']([^"”“']+)["“”']\s+(?:into|in|as|for)\s+(?:the\s+)?(\w+)"#,
+            // chained connector: and/then "VALUE" into/in/as/for FIELD
+            #"(?:and|then)\s+["“”']([^"”“']+)["“”']\s+(?:into|in|as|for)\s+(?:the\s+)?(\w+)"#,
+            // fill (in)? (the)? FIELD with/using "VALUE"
+            #"(?:fill|filling)\s+(?:in\s+)?(?:the\s+)?(\w+)\s+(?:field\s+)?(?:with|using)\s+["“”']([^"”“']+)["“”']"#,
+            // search (for)? "VALUE"
+            #"(?:search|searching)\s+(?:for\s+)?["“”']([^"”“']+)["“”']"#,
+            // Last-resort, verb-less: "VALUE" into/in/as/for (the)? FIELD field|input|box
+            #"["“”']([^"”“']+)["“”']\s+(?:into|in|as|for)\s+(?:the\s+)?(\w+)\s+(?:field|input|box|textarea|input-box)"#
         ]
 
         for (idx, pattern) in patterns.enumerated() {
@@ -103,14 +118,21 @@ extension BrowserAgent {
             let range = NSRange(location: 0, length: nsTask.length)
             regex.enumerateMatches(in: task, options: [], range: range) { match, _, _ in
                 guard let match = match else { return }
+                // search "VALUE" — single-capture pattern
                 if idx == 3, match.numberOfRanges >= 2 {
                     let value = nsTask.substring(with: match.range(at: 1))
                     pairs.append((value, "search"))
-                } else if idx == 2, match.numberOfRanges >= 3 {
+                    return
+                }
+                // fill FIELD with "VALUE" — captures are (field, value)
+                if idx == 2, match.numberOfRanges >= 3 {
                     let field = nsTask.substring(with: match.range(at: 1))
                     let value = nsTask.substring(with: match.range(at: 2))
                     pairs.append((value, field))
-                } else if match.numberOfRanges >= 3 {
+                    return
+                }
+                // All other patterns: captures are (value, field)
+                if match.numberOfRanges >= 3 {
                     let value = nsTask.substring(with: match.range(at: 1))
                     let field = nsTask.substring(with: match.range(at: 2))
                     pairs.append((value, field))
@@ -118,13 +140,19 @@ extension BrowserAgent {
             }
         }
 
-        guard !pairs.isEmpty else { return nil }
+        guard !pairs.isEmpty else {
+            print("🎭 [gepetto] parseFormFillIntent: no pairs detected in: \(task.prefix(200))")
+            return nil
+        }
         var seen = Set<String>()
         let uniq = pairs.filter { seen.insert("\($0.0)|\($0.1)").inserted }
-        return FormFillPlan(
+        let plan = FormFillPlan(
             values: uniq.map { FormFillPlan.Pair(value: $0.0, fieldHint: $0.1) },
             shouldSubmit: shouldSubmit
         )
+        let summary = plan.values.map { "\($0.fieldHint)=\"\($0.value.prefix(8))…\"" }.joined(separator: ", ")
+        print("🎭 [gepetto] parseFormFillIntent: \(plan.values.count) pair(s) → \(summary), submit=\(shouldSubmit)")
+        return plan
     }
 
     // MARK: - Click / refusal heuristics
