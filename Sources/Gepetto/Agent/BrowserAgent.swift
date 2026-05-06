@@ -167,18 +167,26 @@ public struct BrowserAgentConfiguration: Sendable {
     /// recovery entirely.
     public var maxStageRecoveries: Int
 
+    /// Pause inserted BEFORE every stage after the first in a multi-stage
+    /// script. Sites with rate-limits (Hacker News, login-then-post flows,
+    /// etc.) frequently reject back-to-back actions; this gives them
+    /// breathing room. Set to 0 to disable.
+    public var betweenStagesDelayMs: Int
+
     public init(
         maxIterations: Int = 8,
         validateEachStage: Bool = true,
         visualPaceMs: Int = 700,
         headlessViewport: CGSize = CGSize(width: 1024, height: 1366),
-        maxStageRecoveries: Int = 2
+        maxStageRecoveries: Int = 2,
+        betweenStagesDelayMs: Int = 2000
     ) {
         self.maxIterations = maxIterations
         self.validateEachStage = validateEachStage
         self.visualPaceMs = visualPaceMs
         self.headlessViewport = headlessViewport
         self.maxStageRecoveries = maxStageRecoveries
+        self.betweenStagesDelayMs = betweenStagesDelayMs
     }
 
     public static let `default` = BrowserAgentConfiguration()
@@ -385,6 +393,13 @@ public final class BrowserAgent: ObservableObject {
         var lastSnapshot = ""
         for (i, stage) in script.enumerated() {
             print("🎭 [gepetto] runScriptedFlow: stage \(i + 1)/\(script.count) → \(stage.url)")
+            // Inter-stage cooldown so rate-limited sites don't reject the
+            // sequence (HN's 1-action-per-N-seconds policy on submissions
+            // is the canonical case). First stage runs immediately.
+            if i > 0, configuration.betweenStagesDelayMs > 0 {
+                print("🎭 [gepetto] inter-stage cooldown \(configuration.betweenStagesDelayMs)ms before stage \(i + 1)")
+                try? await Task.sleep(nanoseconds: UInt64(configuration.betweenStagesDelayMs) * 1_000_000)
+            }
             ensureWebViewHasLayoutContext(executor)
 
             publishAction(name: "navigate", arguments: ["url": stage.url])
