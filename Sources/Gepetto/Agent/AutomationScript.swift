@@ -141,7 +141,6 @@ extension BrowserAgent {
         }
 
         guard !pairs.isEmpty else {
-            print("🎭 [gepetto] parseFormFillIntent: no pairs detected in: \(task.prefix(200))")
             return nil
         }
         var seen = Set<String>()
@@ -150,8 +149,6 @@ extension BrowserAgent {
             values: uniq.map { FormFillPlan.Pair(value: $0.0, fieldHint: $0.1) },
             shouldSubmit: shouldSubmit
         )
-        let summary = plan.values.map { "\($0.fieldHint)=\"\($0.value.prefix(8))…\"" }.joined(separator: ", ")
-        print("🎭 [gepetto] parseFormFillIntent: \(plan.values.count) pair(s) → \(summary), submit=\(shouldSubmit)")
         return plan
     }
 

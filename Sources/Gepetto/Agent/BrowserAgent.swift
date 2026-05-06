@@ -346,19 +346,15 @@ public final class BrowserAgent: ObservableObject {
         engine: GepettoAIEngine,
         onEvent: @escaping (BrowserAgentEvent) -> Void
     ) async {
-        print("🎭 [gepetto] BrowserAgent.run() ENTRY — task='\(task.prefix(120))…' history=\(history.count) maxIters=\(configuration.maxIterations)")
         currentPhase = .starting
         if executor == nil { start() }
         guard let executor = executor else {
-            print("❌ [gepetto] run(): executor unavailable")
             currentPhase = .failed("session unavailable")
             onEvent(.failed(reason: "Browser session unavailable.", partialText: ""))
             return
         }
 
         if let script = parseAutomationScript(task) {
-            print("🎭 [gepetto] run(): multi-stage script detected, \(script.count) stages")
-            for (i, stage) in script.enumerated() { print("🎭 [gepetto]   stage \(i + 1): \(stage)") }
             await runScriptedFlow(
                 script: script,
                 executor: executor,
@@ -369,8 +365,6 @@ public final class BrowserAgent: ObservableObject {
             )
             return
         }
-
-        print("🎭 [gepetto] run(): single-stage free-form path")
         await runFreeformAgent(
             task: task,
             executor: executor,
@@ -392,12 +386,10 @@ public final class BrowserAgent: ObservableObject {
     ) async {
         var lastSnapshot = ""
         for (i, stage) in script.enumerated() {
-            print("🎭 [gepetto] runScriptedFlow: stage \(i + 1)/\(script.count) → \(stage.url)")
             // Inter-stage cooldown so rate-limited sites don't reject the
             // sequence (HN's 1-action-per-N-seconds policy on submissions
             // is the canonical case). First stage runs immediately.
             if i > 0, configuration.betweenStagesDelayMs > 0 {
-                print("🎭 [gepetto] inter-stage cooldown \(configuration.betweenStagesDelayMs)ms before stage \(i + 1)")
                 try? await Task.sleep(nanoseconds: UInt64(configuration.betweenStagesDelayMs) * 1_000_000)
             }
             ensureWebViewHasLayoutContext(executor)
@@ -409,7 +401,6 @@ public final class BrowserAgent: ObservableObject {
             let nav = await executor.execute(json: ["action": "navigate", "url": stage.url])
             let success = nav.success
             isExecuting = false
-            print("🎭 [gepetto]   stage \(i + 1) navigate success=\(success)")
             lastSnapshot = await postNavigateSnapshot(executor: executor, navResult: nav, fallbackURL: stage.url)
             onEvent(.actionResult(summary: lastSnapshot, success: success))
 
@@ -446,15 +437,11 @@ public final class BrowserAgent: ObservableObject {
                 while !validation.success, recoveryAttempts < configuration.maxStageRecoveries {
                     recoveryAttempts += 1
                     currentPhase = .recovering(attempt: recoveryAttempts)
-                    print("🎭 [gepetto] stage \(i + 1) failed validation (attempt #\(recoveryAttempts)/\(configuration.maxStageRecoveries)) — \(validation.reason)")
-
                     let recovery = await askForRecovery(
                         stageIndex: i, stage: stage, snapshot: lastSnapshot,
                         userTask: userTask, validatorReason: validation.reason,
                         engine: engine
                     )
-                    print("🎭 [gepetto] stage \(i + 1) recovery decision: \(recovery)")
-
                     switch recovery {
                     case .giveUp(let reason):
                         onEvent(.failed(
@@ -632,7 +619,6 @@ public final class BrowserAgent: ObservableObject {
         }
 
         // Couldn't parse — log the raw output so we can iterate the prompt.
-        print("⚠️ [gepetto] recovery: couldn't parse engine output, treating as give-up: \(raw.prefix(200))")
         return .giveUp(reason: "could not parse recovery output: \(raw.prefix(120))")
     }
 
@@ -809,8 +795,6 @@ public final class BrowserAgent: ObservableObject {
         var latestLinks = parseLinks(fromSummary: seedSnapshot)
 
         for iteration in 0..<configuration.maxIterations {
-            print("🎭 [gepetto] ===== iter \(iteration + 1)/\(configuration.maxIterations) =====")
-            print("🎭 [gepetto] prompt preview: \(nextUserTurn.prefix(160).replacingOccurrences(of: "\n", with: " ⏎ "))…")
             var accumulated = ""
             currentPhase = .thinking
             do {
@@ -832,14 +816,10 @@ public final class BrowserAgent: ObservableObject {
                 ))
                 return
             }
-
-            print("🎭 [gepetto] iter \(iteration + 1) LLM output (\(accumulated.count) chars): \(accumulated.prefix(400))")
-
             if let toolCall = ToolCallDetector.detectToolCall(in: accumulated),
                toolCall.name.lowercased() == "browser" {
                 let args = toolCall.arguments
                 let actionName = (args["action"] as? String) ?? "?"
-                print("🎭 [gepetto] iter \(iteration + 1) tool_call: \(actionName) args=\(args)")
                 onEvent(.action(name: actionName, arguments: args))
                 isExecuting = true
                 let result = await executor.execute(json: args)
@@ -866,7 +846,6 @@ public final class BrowserAgent: ObservableObject {
                 let visible = ToolCallDetector.extractTextWithoutToolCall(from: accumulated)
                 if iteration < configuration.maxIterations - 1, looksLikeRefusal(visible) {
                     consecutiveRefusals += 1
-                    print("🎭 [gepetto] iter \(iteration + 1) refusal #\(consecutiveRefusals) — visible: \(visible.prefix(160))")
                     onEvent(.replaceText("Working…"))
                     emitted = ""
                     dialogue.append(GepettoMessage.user(nextUserTurn))

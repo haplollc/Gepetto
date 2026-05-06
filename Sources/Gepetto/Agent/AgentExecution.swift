@@ -35,7 +35,6 @@ extension BrowserAgent {
         var firstFilledSelector: String? = nil
         for pair in plan.values {
             guard let pick = matchField(hint: pair.fieldHint, value: pair.value, fields: fields, exclude: alreadyUsed) else {
-                print("⚠️ [gepetto] no field matched hint='\(pair.fieldHint)' for value='\(pair.value.prefix(8))…'")
                 continue
             }
             alreadyUsed.insert(pick.selector)
@@ -100,13 +99,11 @@ extension BrowserAgent {
         ])
         let actual = readback.data ?? ""
         if actual == value {
-            print("✅ [gepetto] fill verified: \(selector) = \(value.prefix(8))…")
             return
         }
 
         // Mismatch — retry with `type` (focus + per-character keystrokes).
         // First clear, then type.
-        print("⚠️ [gepetto] fill verification FAILED for \(selector). expected=\(value.prefix(12)) got='\(actual.prefix(12))'. Retrying with type().")
         _ = await executor.execute(json: [
             "action": "evaluate",
             "script": "(function(){var e=document.querySelector(\(jsString(selector)));if(e){e.value='';e.focus();}return 'cleared';})();"
@@ -118,16 +115,13 @@ extension BrowserAgent {
         ])
         isExecuting = false
 
-        let readback2 = await executor.execute(json: [
+        // The type() retry will either land or it won't; we don't surface
+        // the difference here because the per-stage validator catches the
+        // downstream effect (form rejected vs accepted).
+        _ = await executor.execute(json: [
             "action": "evaluate",
             "script": "(document.querySelector(\(jsString(selector)))?.value) ?? ''"
         ])
-        let actual2 = readback2.data ?? ""
-        if actual2 == value {
-            print("✅ [gepetto] type() retry succeeded: \(selector)")
-        } else {
-            print("❌ [gepetto] still couldn't fill \(selector) after type() retry. expected=\(value.prefix(12)) got='\(actual2.prefix(12))'")
-        }
     }
 
     /// JS that submits the FORM containing the field at `anchorSelector`,
