@@ -15,13 +15,16 @@
   Navigate • Extract • Interact • Screenshot
 </p>
 
+<!--
+  GitHub strips raw <video> tags whose src is a relative repo path, so we host
+  the demo on the `demo-assets` release and link the asset URL directly.
+  Bare release-asset .mp4 URLs are rendered inline as a video player on
+  github.com (and degrade to a download link on mirrors / NPM-style renderers).
+-->
+
+https://github.com/haplollc/Gepetto/releases/download/demo-assets/gepetto_demo.mp4
+
 <p align="center">
-  <a href="Media/gepetto_demo.mp4">
-    <video src="Media/gepetto_demo.mp4" autoplay loop muted playsinline width="720">
-      <img src="Media/gepetto_demo_poster.jpg" alt="Gepetto demo: a local LLM logs in to Hacker News, navigates to /submit, and posts a link, all from a single natural-language prompt." width="720">
-    </video>
-  </a>
-  <br>
   <sub><em>A local LLM driving a real WKWebView through a multi-step Hacker News flow: log in → navigate to /submit → fill the form → click submit, with per-stage AI validation and recovery.</em></sub>
 </p>
 
