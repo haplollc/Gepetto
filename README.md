@@ -15,6 +15,16 @@
   Navigate • Extract • Interact • Screenshot
 </p>
 
+<p align="center">
+  <a href="Media/gepetto_demo.mp4">
+    <video src="Media/gepetto_demo.mp4" autoplay loop muted playsinline width="720">
+      <img src="Media/gepetto_demo_poster.jpg" alt="Gepetto demo: a local LLM logs in to Hacker News, navigates to /submit, and posts a link, all from a single natural-language prompt." width="720">
+    </video>
+  </a>
+  <br>
+  <sub><em>A local LLM driving a real WKWebView through a multi-step Hacker News flow: log in → navigate to /submit → fill the form → click submit, with per-stage AI validation and recovery.</em></sub>
+</p>
+
 ---
 
 Gepetto provides **programmatic control** over a WKWebView-based browser, enabling AI agents to browse the web, fill forms, click elements, take screenshots, and extract content — all from Swift.
