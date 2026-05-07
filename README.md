@@ -16,16 +16,20 @@
 </p>
 
 <!--
-  GitHub strips raw <video> tags whose src is a relative repo path, so we host
-  the demo on the `demo-assets` release and link the asset URL directly.
-  Bare release-asset .mp4 URLs are rendered inline as a video player on
-  github.com (and degrade to a download link on mirrors / NPM-style renderers).
+  GitHub only renders <video> tags whose src is on a github-owned CDN that
+  user-attachments produces (issue/PR drag-drop), and that URL can't be
+  generated via API. Bare release-asset .mp4 URLs render as plain links.
+  The animated GIF in the repo, on the other hand, renders inline via the
+  standard markdown image syntax — so we ship a GIF for the README preview
+  and keep the full-quality MP4 on the `demo-assets` release for download.
 -->
 
-https://github.com/haplollc/Gepetto/releases/download/demo-assets/gepetto_demo.mp4
-
 <p align="center">
-  <sub><em>A local LLM driving a real WKWebView through a multi-step Hacker News flow: log in → navigate to /submit → fill the form → click submit, with per-stage AI validation and recovery.</em></sub>
+  <a href="https://github.com/haplollc/Gepetto/releases/download/demo-assets/gepetto_demo.mp4">
+    <img src="Media/gepetto_demo.gif" alt="Gepetto demo: a local LLM logs in to Hacker News, navigates to /submit, and posts a link, all from a single natural-language prompt." width="440">
+  </a>
+  <br>
+  <sub><em>A local LLM driving a real WKWebView through a multi-step Hacker News flow: log in → navigate to /submit → fill the form → click submit, with per-stage AI validation and recovery. <a href="https://github.com/haplollc/Gepetto/releases/download/demo-assets/gepetto_demo.mp4">Watch full-quality MP4 →</a></em></sub>
 </p>
 
 ---
