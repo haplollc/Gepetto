@@ -75,6 +75,7 @@ public struct BrowserSheet: View {
                         onDismiss?()
                         dismiss()
                     }
+                    .tint(.primary)
                 }
                 
                 #if os(iOS)
