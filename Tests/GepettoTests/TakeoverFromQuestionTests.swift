@@ -19,11 +19,11 @@ final class TakeoverFromQuestionTests: XCTestCase {
         agent.start()
         defer { agent.shutdown() }
         let engine = ReplyEngine([
-            #"{"thought":"ask","action":{"name":"ask_user","question":"Sign in please?"}}"#,
+            #"{"thought":"ask","action":{"name":"ask_user","question":"Which color do you want?"}}"#,
             #"{"thought":"finish","action":{"name":"done","answer":"thanks","success":true}}"#
         ])
         var states: [String] = []
-        let run = Task { await agent.run(task: "Open the page so I can sign in", engine: engine) { event in
+        let run = Task { await agent.run(task: "Pick a cup for me", engine: engine) { event in
             if case .control(let s) = event { states.append("\(s)") }
         } }
         // Wait for the question.
@@ -40,5 +40,37 @@ final class TakeoverFromQuestionTests: XCTestCase {
         XCTAssertTrue(agent.controlState.isHumanDriving, "after Take over: \(agent.controlState) via \(states)")
         agent.handBack(note: "done")
         _ = await run.value
+    }
+
+    /// "hand_over", and a question that is really "sign in yourself", give
+    /// the person the page at once: no answer box, no extra tap.
+    func testSignInRequestsHandThePageOverAtOnce() async throws {
+        for reply in [#"{"thought":"you","action":{"name":"hand_over","reason":"Sign in to the store"}}"#,
+                      #"{"thought":"you","action":{"name":"ask_user","question":"Please sign in with your password"}}"#] {
+            let agent = BrowserAgent()
+            agent.start()
+            let engine = ReplyEngine([reply, #"{"thought":"finish","action":{"name":"done","answer":"thanks","success":true}}"#])
+            var sawQuestion = false
+            let run = Task { await agent.run(task: "Check my orders", engine: engine) { event in
+                if case .control(.waitingForUser(.question)) = event { sawQuestion = true }
+            } }
+            for _ in 0..<100 {
+                if agent.controlState.isHumanDriving { break }
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            XCTAssertTrue(agent.controlState.isHumanDriving, "\(reply): \(agent.controlState)")
+            XCTAssertFalse(sawQuestion, "a sign-in request must not show an answer box")
+            agent.handBack()
+            _ = await run.value
+            agent.shutdown()
+        }
+    }
+
+    func testWhichQuestionsNeedThePersonOnThePage() {
+        XCTAssertTrue(AgentLoopHeuristics.needsThePersonOnThePage("Could you sign in to Medium?"))
+        XCTAssertTrue(AgentLoopHeuristics.needsThePersonOnThePage("Enter the verification code from your phone"))
+        XCTAssertTrue(AgentLoopHeuristics.needsThePersonOnThePage("Please type your password"))
+        XCTAssertFalse(AgentLoopHeuristics.needsThePersonOnThePage("Which color do you want?"))
+        XCTAssertFalse(AgentLoopHeuristics.needsThePersonOnThePage("Should I pick the cheaper one?"))
     }
 }

@@ -27,8 +27,11 @@ public enum AgentAction: Sendable, Equatable {
     case wait(seconds: Double)
     /// Read the full page (not just the viewport) and keep going.
     case extract
-    /// The agent needs the person: a login, a code, a captcha, a choice.
+    /// The agent needs information or a choice from the person.
     case askUser(question: String)
+    /// The person must do this on the page themselves (sign in, a code, a
+    /// captcha, payment): the page is handed to them straight away.
+    case handOver(reason: String)
     case done(answer: String, success: Bool)
 
     public enum ScrollIntent: String, Sendable, CaseIterable {
@@ -50,6 +53,7 @@ public enum AgentAction: Sendable, Equatable {
         case .wait:       return "wait"
         case .extract:    return "extract"
         case .askUser:    return "ask_user"
+        case .handOver:   return "hand_over"
         case .done:       return "done"
         }
     }
@@ -77,6 +81,7 @@ public enum AgentAction: Sendable, Equatable {
         case .wait:       return "clock"
         case .extract:    return "doc.text.magnifyingglass"
         case .askUser:    return "person.fill.questionmark"
+        case .handOver:   return "hand.raised"
         case .done:       return "checkmark.circle"
         }
     }
@@ -99,6 +104,7 @@ public enum AgentAction: Sendable, Equatable {
         case .wait(let s):                  return "wait(\(s)s)"
         case .extract:                      return "extract"
         case .askUser(let q):               return "ask_user(\"\(q.prefix(60))\")"
+        case .handOver(let r):              return "hand_over(\"\(r.prefix(60))\")"
         case .done(let a, let ok):          return "done(\(ok ? "success" : "gave up"): \(a.prefix(60)))"
         }
     }
@@ -123,6 +129,7 @@ public enum AgentAction: Sendable, Equatable {
         case .wait(let s):                  return "Waiting \(Int(s.rounded()))s for the page"
         case .extract:                      return "Reading the whole page"
         case .askUser:                      return "Needs you"
+        case .handOver:                     return "Your turn"
         case .done(_, let ok):              return ok ? "Done" : "Stopped"
         }
     }
@@ -385,7 +392,7 @@ public enum AgentOutputParser {
     /// Action names the bare-key form (`{"click": 3}`) accepts, canonical
     /// names first, so a stray "answer" beside a real action never wins.
     static let bareKeyNames: [String] = ["click", "type", "select", "set_checked", "scroll_to", "scroll", "navigate", "search",
-                                         "back", "press", "wait", "extract", "ask_user", "done",
+                                         "back", "press", "wait", "extract", "ask_user", "hand_over", "done",
                                          "click_element", "input_text", "go_to_url", "final_answer", "answer"]
 
     static func decision(from obj: [String: Any]) -> AgentDecision? {
@@ -560,7 +567,9 @@ public enum AgentOutputParser {
             return .wait(seconds: min(10, max(0.5, s)))
         case "extract", "extract_text", "extract_content", "read", "read_page", "get_text":
             return .extract
-        case "ask_user", "ask", "ask_human", "request_user", "need_user", "handoff", "takeover", "request_help":
+        case "hand_over", "handover", "hand_off", "handoff", "takeover", "take_over", "give_control":
+            return .handOver(reason: str("reason", "question", "text", "message") ?? "Please finish this on the page, then hand back.")
+        case "ask_user", "ask", "ask_human", "request_user", "need_user", "request_help":
             return .askUser(question: str("question", "text", "message", "reason") ?? "I need your help with this page.")
         case "done", "finish", "final_answer", "complete", "answer", "stop":
             let text = str("answer", "text", "result", "message", "summary", "final_answer") ?? ""

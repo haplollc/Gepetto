@@ -183,7 +183,7 @@ struct TakeoverBar: View {
         case .blocker(.login):        return "person.badge.key"
         case .blocker(.twoFactor):    return "number"
         case .blocker(.payment):      return "creditcard"
-        case .agentAsked:             return "questionmark.bubble"
+        case .agentAsked:             return "hand.raised"
         }
     }
 

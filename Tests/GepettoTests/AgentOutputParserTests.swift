@@ -66,6 +66,8 @@ final class AgentOutputParserTests: XCTestCase {
         XCTAssertEqual(parse(#"{"click": 2}"#)?.action, .click(index: 2))
         XCTAssertEqual(parse(#"{"navigate": "https://example.com"}"#)?.action, .navigate(url: "https://example.com"))
         XCTAssertEqual(parse(#"{"ask_user": "Please log in"}"#)?.action, .askUser(question: "Please log in"))
+        XCTAssertEqual(parse(#"{"action":{"name":"hand_over","reason":"Sign in"}}"#)?.action, .handOver(reason: "Sign in"))
+        XCTAssertEqual(parse(#"{"action":"takeover","reason":"Enter the code"}"#)?.action, .handOver(reason: "Enter the code"))
     }
 
     func testPlainAnswerBecomesDone() {
