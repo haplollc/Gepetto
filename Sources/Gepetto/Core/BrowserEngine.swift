@@ -45,7 +45,16 @@ public final class BrowserEngine: NSObject, ObservableObject {
     @Published public private(set) var lastError: BrowserError?
     
     /// Whether an action is currently executing
-    @Published public private(set) var isExecutingAction: Bool = false
+    @Published public internal(set) var isExecutingAction: Bool = false
+
+    /// Whether the person may touch the page. Off while the agent drives, so
+    /// a stray tap cannot race the agent; on during a takeover and when idle.
+    @Published public private(set) var acceptsUserInput: Bool = true
+
+    /// The last JavaScript alert / confirm the page showed. Alerts are
+    /// acknowledged and confirms accepted automatically; the text is kept so
+    /// the agent can tell the model what the page said.
+    @Published public private(set) var lastDialogMessage: String?
     
     // MARK: - Internal State
     
@@ -87,6 +96,9 @@ public final class BrowserEngine: NSObject, ObservableObject {
         if let customUserAgent = configuration.userAgent {
             webConfig.applicationNameForUserAgent = customUserAgent
         }
+
+        // Page observation script (window.__gepetto) in every frame.
+        webConfig.userContentController.addUserScript(BrowserEngine.pageUserScript)
         
         self.webView = WKWebView(frame: .zero, configuration: webConfig)
         
@@ -213,6 +225,14 @@ public final class BrowserEngine: NSObject, ObservableObject {
         }
     }
     
+    /// Allow or block direct interaction with the page.
+    public func setUserInteractionEnabled(_ enabled: Bool) {
+        acceptsUserInput = enabled
+        #if os(iOS)
+        webView.isUserInteractionEnabled = enabled
+        #endif
+    }
+
     /// Stop loading the current page.
     public func stopLoading() {
         webView.stopLoading()
@@ -918,5 +938,26 @@ extension BrowserEngine: WKUIDelegate {
             webView.load(navigationAction.request)
         }
         return nil
+    }
+
+    // JavaScript dialogs would otherwise block an unattended run. Alerts are
+    // acknowledged, confirms accepted, prompts cancelled; the message is kept
+    // for the agent to report.
+    public func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                        initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        lastDialogMessage = message
+        completionHandler()
+    }
+
+    public func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                        initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        lastDialogMessage = message
+        completionHandler(true)
+    }
+
+    public func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?,
+                        initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
+        lastDialogMessage = prompt
+        completionHandler(nil)
     }
 }

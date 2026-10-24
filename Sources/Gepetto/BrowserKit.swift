@@ -56,7 +56,7 @@ import Foundation
 // MARK: - Version
 
 /// Gepetto version
-public let browserKitVersion = "1.0.0"
+public let browserKitVersion = "2.0.0"
 
 // All types are automatically exported since they're declared public in their respective files.
 // Import Gepetto to access:
@@ -79,7 +79,15 @@ public let browserKitVersion = "1.0.0"
 // - BrowserTool.Result
 // - BrowserToolExecutor
 //
+// Agent:
+// - BrowserAgent (run / pause / resume / stop / takeOver / handBack / respond / answer)
+// - BrowserAgentConfiguration, BrowserAgentEvent, AgentPhase
+// - AgentAction, AgentDecision, AgentOutputParser
+// - AgentControlState, UserRequest, TakeoverReason, SensitiveActionRules, AgentStep
+// - PageSnapshot, ObservationOptions, PageBlocker (BrowserEngine.observe())
+//
 // Views:
+// - AgentBrowserPanel
 // - BrowserView
 // - BrowserNavBar
 // - BrowserSheet

@@ -2,25 +2,19 @@
 //  BrowserAgent.swift
 //  Gepetto
 //
-//  High-level agent that drives a real WKWebView via the browser tool from a
-//  pluggable AI backend (`GepettoAIEngine`). One public method — `run(task:)`.
+//  The agent: a real WKWebView driven by a pluggable model
+//  (`GepettoAIEngine`), with the person able to step in at any time.
 //
-//  Features baked in:
-//   - Headless host: parents the WKWebView in a hidden UIWindow / NSWindow
-//     with a real viewport so `innerText` / `takeSnapshot` work without UI.
-//   - Multi-stage automation: a single prompt with multiple URLs is parsed
-//     into ordered (URL + form-fill + submit) stages and driven
-//     deterministically.
-//   - Form-fill takeover: extracts real form selectors and fills by name /
-//     type / placeholder heuristics so weak models can complete forms.
-//   - Auto-content-click: when the user says "click into the top story"
-//     etc., picks the first external content link and navigates.
-//   - Per-stage AI validation: after every navigate / form-fill, the agent
-//     asks the AI engine "did this stage succeed?" and aborts on failure
-//     instead of plowing through bad state.
-//   - Refusal detection + nudge + deterministic takeover for weak local LLMs.
+//  Two ways of working, picked per task:
+//   - Scripted flow (ScriptedFlow.swift): tasks naming several URLs run as
+//     deterministic navigate → fill → submit stages with AI validation.
+//   - Agent loop (AgentLoop.swift): everything else. Each step the agent
+//     observes the page as a numbered list of elements, asks the model for
+//     one action as JSON, runs it, and checks what changed.
 //
-//  See the README for usage examples.
+//  Control (AgentControl.swift): pause / resume / stop, take over / hand
+//  back, confirm sensitive actions, answer the agent's questions. The UI in
+//  Views/ binds to the published state here.
 //
 
 import Foundation
@@ -52,6 +46,11 @@ public enum AgentPhase: Sendable, Equatable {
     case validating
     case recovering(attempt: Int)
     case summarizing       // streaming the final answer
+    case waiting(seconds: Int)
+    case paused
+    case handedOver        // the person is driving
+    case awaitingApproval
+    case awaitingAnswer
     case finished
     case failed(String)
 
@@ -72,6 +71,11 @@ public enum AgentPhase: Sendable, Equatable {
         case .validating:                 return "Checking result…"
         case .recovering(let n):          return "Trying a fix… (attempt \(n))"
         case .summarizing:                return "Writing answer…"
+        case .waiting(let s):             return "Waiting \(s)s…"
+        case .paused:                     return "Paused"
+        case .handedOver:                 return "You're in control"
+        case .awaitingApproval:           return "Waiting for your OK"
+        case .awaitingAnswer:             return "Waiting for your answer"
         case .finished:                   return "Done"
         case .failed(let reason):         return "Failed: \(reason.prefix(60))"
         }
@@ -87,6 +91,7 @@ public enum AgentPhase: Sendable, Equatable {
         case .thinking, .summarizing:  return "waiting on AI response"
         case .readingPage, .extracting: return "running JS in the page"
         case .validating:              return "asking the AI to verify the page"
+        case .handedOver:              return "hand control back when you're ready"
         default:                       return nil
         }
     }
@@ -108,6 +113,11 @@ public enum AgentPhase: Sendable, Equatable {
         case .validating:         return "checkmark.seal"
         case .recovering:         return "arrow.triangle.2.circlepath"
         case .summarizing:        return "text.bubble"
+        case .waiting:            return "clock"
+        case .paused:             return "pause.fill"
+        case .handedOver:         return "hand.raised.fill"
+        case .awaitingApproval:   return "checkmark.shield"
+        case .awaitingAnswer:     return "questionmark.bubble"
         case .failed:             return "exclamationmark.triangle"
         }
     }
@@ -135,6 +145,12 @@ public enum BrowserAgentEvent: Sendable {
     /// AI for a corrective action (e.g. shorter title, click "OK" to dismiss
     /// an error, navigate elsewhere). Emitted before the recovery action runs.
     case recovering(stageIndex: Int, attempt: Int, plan: String)
+    /// The model's reasoning for the step it is about to take, as it streams.
+    case thinking(String)
+    /// A step finished (also available as `BrowserAgent.steps`).
+    case step(AgentStep)
+    /// Control changed hands: paused, taken over, waiting for approval, …
+    case control(AgentControlState)
     /// Agent finished cleanly with a final natural-language answer.
     case complete(finalText: String)
     /// Agent failed (bad output, max iterations, validation failure, etc.).
@@ -144,12 +160,12 @@ public enum BrowserAgentEvent: Sendable {
 // MARK: - Configuration
 
 public struct BrowserAgentConfiguration: Sendable {
-    /// Maximum number of agent-loop iterations for the free-form (single
-    /// stage) path before bailing.
+    /// Maximum number of agent-loop steps for the free-form path before
+    /// bailing. (Kept as `maxIterations` for source compatibility.)
     public var maxIterations: Int
 
     /// When true, the agent asks the AI engine to validate the result page
-    /// after each automation stage. Costs an extra round-trip per stage but
+    /// after each scripted stage. Costs an extra round-trip per stage but
     /// catches silent failures (e.g. login showed an error but the agent
     /// proceeded anyway).
     public var validateEachStage: Bool
@@ -162,24 +178,57 @@ public struct BrowserAgentConfiguration: Sendable {
     public var headlessViewport: CGSize
 
     /// When a stage fails validation, the agent asks the AI engine for a
-    /// corrective action (e.g. retry the form with a shorter title) and
-    /// retries up to this many times before giving up. Set to 0 to disable
-    /// recovery entirely.
+    /// corrective action and retries up to this many times before giving up.
     public var maxStageRecoveries: Int
 
     /// Pause inserted BEFORE every stage after the first in a multi-stage
-    /// script. Sites with rate-limits (Hacker News, login-then-post flows,
-    /// etc.) frequently reject back-to-back actions; this gives them
-    /// breathing room. Set to 0 to disable.
+    /// script, for sites that rate-limit back-to-back actions.
     public var betweenStagesDelayMs: Int
 
+    /// How the page is observed each step.
+    public var observation: ObservationOptions
+
+    /// Draw numbered badges on the page for every element the model can see.
+    public var showMarks: Bool
+
+    /// Ring the element the agent is about to act on.
+    public var highlightTargets: Bool
+
+    /// Click "Accept" on cookie / consent banners before observing.
+    public var autoDismissConsent: Bool
+
+    /// Hand the page to the person when a login, verification code, captcha
+    /// or payment form appears. Captchas are always handed over.
+    public var handOverBlockers: Set<PageBlocker>
+
+    /// Which sensitive actions need approval.
+    public var sensitiveActions: SensitiveActionRules
+
+    /// Template for the `search` action; `%@` is replaced by the escaped query.
+    public var searchURLTemplate: String
+
+    /// Accent colour (CSS) for in-page marks and highlights.
+    public var accentCSSColor: String
+
+    /// How many recent steps the model is reminded of each turn.
+    public var historyWindow: Int
+
     public init(
-        maxIterations: Int = 8,
+        maxIterations: Int = 25,
         validateEachStage: Bool = true,
         visualPaceMs: Int = 700,
         headlessViewport: CGSize = CGSize(width: 1024, height: 1366),
         maxStageRecoveries: Int = 2,
-        betweenStagesDelayMs: Int = 2000
+        betweenStagesDelayMs: Int = 2000,
+        observation: ObservationOptions = .default,
+        showMarks: Bool = true,
+        highlightTargets: Bool = true,
+        autoDismissConsent: Bool = true,
+        handOverBlockers: Set<PageBlocker> = [.captcha, .twoFactor, .payment],
+        sensitiveActions: SensitiveActionRules = .default,
+        searchURLTemplate: String = "https://html.duckduckgo.com/html/?q=%@",
+        accentCSSColor: String = "#007CF8",
+        historyWindow: Int = 8
     ) {
         self.maxIterations = maxIterations
         self.validateEachStage = validateEachStage
@@ -187,6 +236,15 @@ public struct BrowserAgentConfiguration: Sendable {
         self.headlessViewport = headlessViewport
         self.maxStageRecoveries = maxStageRecoveries
         self.betweenStagesDelayMs = betweenStagesDelayMs
+        self.observation = observation
+        self.showMarks = showMarks
+        self.highlightTargets = highlightTargets
+        self.autoDismissConsent = autoDismissConsent
+        self.handOverBlockers = handOverBlockers
+        self.sensitiveActions = sensitiveActions
+        self.searchURLTemplate = searchURLTemplate
+        self.accentCSSColor = accentCSSColor
+        self.historyWindow = historyWindow
     }
 
     public static let `default` = BrowserAgentConfiguration()
@@ -212,15 +270,36 @@ public final class BrowserAgent: ObservableObject {
     /// "what was clicked / where we navigated" without parsing arg dicts.
     @Published public internal(set) var lastActionTarget: String?
 
-    /// Optional one-line explanation of why the agent took the last action
-    /// (refusal nudge, validation retry, "auto-following into top story",
-    /// etc.). Hidden by default, surfaced for debugging UX.
+    /// Optional one-line explanation of why the agent took the last action.
     @Published public internal(set) var lastActionReason: String?
 
-    /// Coarse-grained activity the agent is doing RIGHT NOW. SwiftUI views
-    /// should show this prominently so the user always knows the agent is
-    /// alive and what step it's on.
+    /// Coarse-grained activity the agent is doing RIGHT NOW.
     @Published public internal(set) var currentPhase: AgentPhase = .idle
+
+    /// Who is driving, and what the agent is waiting on.
+    @Published public internal(set) var controlState: AgentControlState = .idle
+
+    /// The task being worked on.
+    @Published public internal(set) var task: String?
+
+    /// Every step taken so far in this run.
+    @Published public internal(set) var steps: [AgentStep] = []
+
+    /// The model's current reasoning, streamed as it thinks.
+    @Published public internal(set) var currentThought: String?
+
+    /// What the model has learned so far (its own notes).
+    @Published public internal(set) var memory: String?
+
+    /// The page as last observed.
+    @Published public internal(set) var snapshot: PageSnapshot?
+
+    /// The element the agent is acting on right now, in web-view points,
+    /// for cursor animation. Nil between actions.
+    @Published public internal(set) var activeTargetFrame: CGRect?
+
+    /// Hand-back summary from the most recent takeover, if any.
+    @Published public internal(set) var lastHandBack: HandBackSummary?
 
     // ---- Internals --------------------------------------------------------
 
@@ -231,6 +310,22 @@ public final class BrowserAgent: ObservableObject {
     #elseif canImport(AppKit)
     private var hiddenWindow: NSWindow?
     #endif
+
+    /// Resumed by the control API while the loop waits on the person.
+    var userContinuation: CheckedContinuation<UserResponse, Never>?
+    /// Set by `takeOver()` / `pause()` / `stop()`; consumed at the next step boundary.
+    var pendingControl: PendingControl?
+    var stopRequested = false
+
+    enum PendingControl { case pause, takeover }
+
+    enum UserResponse {
+        case resumed
+        case handedBack(note: String?)
+        case confirmed(Bool)
+        case answered(String)
+        case stopped
+    }
 
     // ---- Public API -------------------------------------------------------
 
@@ -257,10 +352,13 @@ public final class BrowserAgent: ObservableObject {
             webView.frame = viewport
             attachWebViewToHiddenHost(webView, viewport: viewport)
         }
+        // A person only drives during a takeover.
+        exec.engine?.setUserInteractionEnabled(true)
     }
 
     /// Tear down the browser session and release resources.
     public func shutdown() {
+        stop()
         executor?.stop()
         executor = nil
         isAvailable = false
@@ -272,7 +370,113 @@ public final class BrowserAgent: ObservableObject {
         lastActionTarget = nil
         lastActionReason = nil
         currentPhase = .idle
+        controlState = .idle
         isExecuting = false
+        steps = []
+        currentThought = nil
+        memory = nil
+        snapshot = nil
+        activeTargetFrame = nil
+        task = nil
+    }
+
+    // MARK: Control
+
+    /// Pause before the next step. The page stays as it is.
+    public func pause() {
+        guard controlState == .running else { return }
+        pendingControl = .pause
+    }
+
+    /// Continue after `pause()`.
+    public func resume() {
+        guard controlState == .paused else { return }
+        resumeUser(with: .resumed)
+    }
+
+    /// Stop the run. The agent reports `failed` with a "stopped" reason.
+    public func stop() {
+        guard controlState.isActive else { return }
+        stopRequested = true
+        if userContinuation != nil {
+            resumeUser(with: .stopped)
+        } else {
+            setControl(.stopping)
+        }
+    }
+
+    /// Give the page to the person. Takes effect at the next step boundary,
+    /// or immediately when the agent is paused or waiting.
+    public func takeOver() {
+        switch controlState {
+        case .running:
+            pendingControl = .takeover
+        case .paused:
+            // Swap the wait: the loop resumes and immediately enters takeover.
+            pendingControl = .takeover
+            resumeUser(with: .resumed)
+        case .waitingForUser(.confirm), .waitingForUser(.question):
+            pendingControl = .takeover
+            resumeUser(with: .confirmed(false))
+        default:
+            break
+        }
+    }
+
+    /// Return control to the agent after a takeover. `note` is shown to the
+    /// model ("I logged in, use my account").
+    public func handBack(note: String? = nil) {
+        guard controlState.isHumanDriving else { return }
+        resumeUser(with: .handedBack(note: note))
+    }
+
+    /// Approve or decline a sensitive action the agent asked about.
+    public func respond(allow: Bool) {
+        guard case .waitingForUser(.confirm) = controlState else { return }
+        resumeUser(with: .confirmed(allow))
+    }
+
+    /// Answer a question the agent asked.
+    public func answer(_ text: String) {
+        guard case .waitingForUser(.question) = controlState else { return }
+        resumeUser(with: .answered(text))
+    }
+
+    func setControl(_ state: AgentControlState) {
+        controlState = state
+        switch state {
+        case .paused:              currentPhase = .paused
+        case .waitingForUser(.takeover): currentPhase = .handedOver
+        case .waitingForUser(.confirm):  currentPhase = .awaitingApproval
+        case .waitingForUser(.question): currentPhase = .awaitingAnswer
+        default: break
+        }
+        onControlChange?(state)
+    }
+
+    /// Set by the running loop so control changes reach its event callback.
+    var onControlChange: ((AgentControlState) -> Void)?
+
+    /// Park the loop until the person responds.
+    func waitForUser(_ request: UserRequest) async -> UserResponse {
+        setControl(.waitingForUser(request))
+        if case .takeover = request {
+            await executor?.engine?.hideMarks()
+            await executor?.engine?.clearHighlight()
+            activeTargetFrame = nil
+        }
+        let response = await withCheckedContinuation { (c: CheckedContinuation<UserResponse, Never>) in
+            userContinuation = c
+        }
+        if case .stopped = response { return response }
+        if controlState.isActive { setControl(.running) }
+        return response
+    }
+
+    private func resumeUser(with response: UserResponse) {
+        guard let c = userContinuation else { return }
+        userContinuation = nil
+        c.resume(returning: response)
     }
 
     /// Publish the current tool call so SwiftUI panels can render a status
@@ -317,7 +521,6 @@ public final class BrowserAgent: ObservableObject {
     private func humanTarget(name: String, arguments: [String: Any]) -> String? {
         if let url = arguments["url"] as? String, !url.isEmpty { return url }
         if let text = arguments["text"] as? String, !text.isEmpty {
-            // For fill/type — show "field: value" preview.
             if name == "fill" || name == "type", let field = arguments["field"] as? String, !field.isEmpty {
                 return "\(field): \(text.prefix(40))"
             }
@@ -354,6 +557,24 @@ public final class BrowserAgent: ObservableObject {
             return
         }
 
+        // Fresh run state.
+        self.task = task
+        steps = []
+        currentThought = nil
+        memory = nil
+        lastHandBack = nil
+        stopRequested = false
+        pendingControl = nil
+        onControlChange = { state in onEvent(.control(state)) }
+        setControl(.running)
+        executor.engine?.setUserInteractionEnabled(false)
+        defer {
+            executor.engine?.setUserInteractionEnabled(true)
+            onControlChange = nil
+            activeTargetFrame = nil
+            Task { await executor.engine?.hideMarks(); await executor.engine?.clearHighlight() }
+        }
+
         if let script = parseAutomationScript(task) {
             await runScriptedFlow(
                 script: script,
@@ -363,9 +584,12 @@ public final class BrowserAgent: ObservableObject {
                 history: history,
                 onEvent: onEvent
             )
+            if case .finished = controlState {} else {
+                setControl(.finished(success: currentPhase == .finished))
+            }
             return
         }
-        await runFreeformAgent(
+        await runAgentLoop(
             task: task,
             executor: executor,
             engine: engine,
@@ -374,588 +598,9 @@ public final class BrowserAgent: ObservableObject {
         )
     }
 
-    // MARK: - Multi-stage scripted flow
-
-    private func runScriptedFlow(
-        script: [AutomationStage],
-        executor: BrowserToolExecutor,
-        engine: GepettoAIEngine,
-        userTask: String,
-        history: [GepettoMessage],
-        onEvent: @escaping (BrowserAgentEvent) -> Void
-    ) async {
-        var lastSnapshot = ""
-        for (i, stage) in script.enumerated() {
-            // Inter-stage cooldown so rate-limited sites don't reject the
-            // sequence (HN's 1-action-per-N-seconds policy on submissions
-            // is the canonical case). First stage runs immediately.
-            if i > 0, configuration.betweenStagesDelayMs > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(configuration.betweenStagesDelayMs) * 1_000_000)
-            }
-            ensureWebViewHasLayoutContext(executor)
-
-            publishAction(name: "navigate", arguments: ["url": stage.url])
-
-            onEvent(.action(name: "navigate", arguments: ["url": stage.url]))
-            isExecuting = true
-            let nav = await executor.execute(json: ["action": "navigate", "url": stage.url])
-            let success = nav.success
-            isExecuting = false
-            lastSnapshot = await postNavigateSnapshot(executor: executor, navResult: nav, fallbackURL: stage.url)
-            onEvent(.actionResult(summary: lastSnapshot, success: success))
-
-            if !success {
-                onEvent(.failed(reason: "Navigation to \(stage.url) failed.", partialText: lastSnapshot))
-                return
-            }
-
-            await visualPace()
-
-            if let plan = stage.fillPlan {
-                lastSnapshot = await deterministicFormFill(
-                    plan: plan,
-                    executor: executor,
-                    onEvent: onEvent
-                )
-                await visualPace(extraMs: 700)
-            }
-
-            // Per-stage validation + recovery: ask the AI engine whether the
-            // post-stage page reflects success. If not, ask the engine for a
-            // corrective action (shorter title, dismiss error, click another
-            // button, navigate elsewhere) and retry up to maxStageRecoveries
-            // times before truly giving up.
-            if configuration.validateEachStage {
-                currentPhase = .validating
-                var validation = await validateStage(
-                    stageIndex: i, stage: stage, snapshot: lastSnapshot,
-                    userTask: userTask, engine: engine
-                )
-                onEvent(.validation(stageIndex: i, success: validation.success, reason: validation.reason))
-
-                var recoveryAttempts = 0
-                while !validation.success, recoveryAttempts < configuration.maxStageRecoveries {
-                    recoveryAttempts += 1
-                    currentPhase = .recovering(attempt: recoveryAttempts)
-                    let recovery = await askForRecovery(
-                        stageIndex: i, stage: stage, snapshot: lastSnapshot,
-                        userTask: userTask, validatorReason: validation.reason,
-                        engine: engine
-                    )
-                    switch recovery {
-                    case .giveUp(let reason):
-                        onEvent(.failed(
-                            reason: "Stage \(i + 1) failed: \(validation.reason). Recovery declined: \(reason)",
-                            partialText: lastSnapshot
-                        ))
-                        return
-                    case .retryForm(let newValues, let summary):
-                        onEvent(.recovering(stageIndex: i, attempt: recoveryAttempts, plan: summary))
-                        // Re-fetch the page state (form may have re-rendered
-                        // after submit) and re-fill with the new values.
-                        lastSnapshot = await postNavigateSnapshot(
-                            executor: executor,
-                            navResult: BrowserTool.Result(success: true),
-                            fallbackURL: stage.url
-                        )
-                        let newPlan = FormFillPlan(
-                            values: newValues.map { FormFillPlan.Pair(value: $0.value, fieldHint: $0.fieldHint) },
-                            shouldSubmit: stage.fillPlan?.shouldSubmit ?? true
-                        )
-                        lastSnapshot = await deterministicFormFill(plan: newPlan, executor: executor, onEvent: onEvent)
-                        await visualPace(extraMs: 700)
-                    case .clickText(let text, let summary):
-                        onEvent(.recovering(stageIndex: i, attempt: recoveryAttempts, plan: summary))
-                        publishAction(name: "click_text", arguments: ["text": text], reason: "recovery: \(summary)")
-                        onEvent(.action(name: "click_text", arguments: ["text": text]))
-                        isExecuting = true
-                        let r = await executor.execute(json: ["action": "click_text", "text": text])
-                        isExecuting = false
-                        lastSnapshot = await postNavigateSnapshot(executor: executor, navResult: r, fallbackURL: stage.url)
-                        onEvent(.actionResult(summary: lastSnapshot, success: r.success))
-                        await visualPace(extraMs: 500)
-                    case .navigate(let url, let summary):
-                        onEvent(.recovering(stageIndex: i, attempt: recoveryAttempts, plan: summary))
-                        publishAction(name: "navigate", arguments: ["url": url], reason: "recovery: \(summary)")
-                        onEvent(.action(name: "navigate", arguments: ["url": url]))
-                        isExecuting = true
-                        let r = await executor.execute(json: ["action": "navigate", "url": url])
-                        isExecuting = false
-                        lastSnapshot = await postNavigateSnapshot(executor: executor, navResult: r, fallbackURL: url)
-                        onEvent(.actionResult(summary: lastSnapshot, success: r.success))
-                        await visualPace(extraMs: 500)
-                    }
-
-                    // Re-validate after the recovery action.
-                    validation = await validateStage(
-                        stageIndex: i, stage: stage, snapshot: lastSnapshot,
-                        userTask: userTask, engine: engine
-                    )
-                    onEvent(.validation(stageIndex: i, success: validation.success, reason: validation.reason))
-                }
-
-                if !validation.success {
-                    onEvent(.failed(
-                        reason: "Stage \(i + 1) still failing after \(recoveryAttempts) recovery attempt(s): \(validation.reason)",
-                        partialText: lastSnapshot
-                    ))
-                    return
-                }
-            }
-        }
-
-        // Final summary turn.
-        await streamSummary(
-            engine: engine,
-            history: history,
-            userTask: userTask,
-            finalSnapshot: lastSnapshot,
-            onEvent: onEvent
-        )
-    }
-
-    /// What the AI engine decided to do when a stage validation failed.
-    enum StageRecovery: CustomStringConvertible {
-        case giveUp(reason: String)
-        case retryForm(newValues: [(value: String, fieldHint: String)], summary: String)
-        case clickText(text: String, summary: String)
-        case navigate(url: String, summary: String)
-
-        var description: String {
-            switch self {
-            case .giveUp(let r):           return "give-up: \(r)"
-            case .retryForm(let v, let s): return "retry-form (\(v.count) field(s)): \(s)"
-            case .clickText(let t, let s): return "click-text \"\(t)\": \(s)"
-            case .navigate(let u, let s):  return "navigate \(u): \(s)"
-            }
-        }
-    }
-
-    /// Ask the AI engine for a single corrective action when a stage failed
-    /// validation. The engine must respond with one line in a strict format —
-    /// JSON for actionable recoveries, a `GIVE_UP:` prefix when no plausible
-    /// fix exists.
-    private func askForRecovery(
-        stageIndex: Int,
-        stage: AutomationStage,
-        snapshot: String,
-        userTask: String,
-        validatorReason: String,
-        engine: GepettoAIEngine
-    ) async -> StageRecovery {
-        let stageDescription = stage.fillPlan.map { plan -> String in
-            let fields = plan.values.map { "\($0.fieldHint)=\"\($0.value)\"" }.joined(separator: ", ")
-            return "navigate to \(stage.url) and submit form (\(fields))"
-        } ?? "navigate to \(stage.url)"
-
-        let prompt = """
-        A browser automation step failed. You have ONE chance to attempt a recovery.
-
-        ORIGINAL USER TASK:
-        \(userTask)
-
-        STAGE THAT FAILED:
-        \(stageDescription)
-
-        VALIDATOR'S REASON FOR FAILURE:
-        \(validatorReason)
-
-        CURRENT PAGE STATE:
-        \(snapshot)
-
-        Respond with EXACTLY one line, no commentary, in one of these formats:
-
-        RETRY_FORM: {"fields":[{"hint":"<fieldHint>","value":"<new value>"}, ...]}
-            Use this when one or more form values were rejected (too long, invalid format, missing) and you can supply better values. List ONLY the fields that need to change. Common fixes: shorter title, different format, fewer characters, valid email shape.
-
-        CLICK_TEXT: {"text":"<button or link text>"}
-            Use this when there's a visible button/link you should click to dismiss an error or move past a confirmation (e.g. "OK", "Dismiss", "Try Again", "Continue").
-
-        NAVIGATE: {"url":"<destination>"}
-            Use this when the recovery needs you to go to a different page entirely.
-
-        GIVE_UP: <one-sentence reason>
-            Only when there is genuinely no plausible recovery — wrong account, hard 403/404, content blocked, captcha, etc.
-
-        Pick the SINGLE best option. Output one line.
-        """
-
-        let raw: String
-        do {
-            raw = try await engine.complete(messages: [GepettoMessage.user(prompt)], systemPrompt: nil)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        } catch {
-            return .giveUp(reason: "recovery prompt failed: \(error.localizedDescription)")
-        }
-
-        // Strip leading "RETRY_FORM:" / "CLICK_TEXT:" / "NAVIGATE:" / "GIVE_UP:".
-        if let body = stripped(raw, prefix: "GIVE_UP:") {
-            return .giveUp(reason: body)
-        }
-        if let body = stripped(raw, prefix: "RETRY_FORM:"),
-           let data = body.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let fields = obj["fields"] as? [[String: Any]] {
-            let pairs: [(String, String)] = fields.compactMap {
-                guard let hint = $0["hint"] as? String, let value = $0["value"] as? String else { return nil }
-                return (value, hint)
-            }
-            if !pairs.isEmpty {
-                let summary = pairs.map { "\($0.1)=\"\($0.0.prefix(40))…\"" }.joined(separator: ", ")
-                return .retryForm(newValues: pairs.map { (value: $0.0, fieldHint: $0.1) }, summary: summary)
-            }
-        }
-        if let body = stripped(raw, prefix: "CLICK_TEXT:"),
-           let data = body.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let text = obj["text"] as? String, !text.isEmpty {
-            return .clickText(text: text, summary: "click \"\(text)\"")
-        }
-        if let body = stripped(raw, prefix: "NAVIGATE:"),
-           let data = body.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let url = obj["url"] as? String, !url.isEmpty {
-            return .navigate(url: url, summary: "navigate to \(url)")
-        }
-
-        // Couldn't parse — log the raw output so we can iterate the prompt.
-        return .giveUp(reason: "could not parse recovery output: \(raw.prefix(120))")
-    }
-
-    private func stripped(_ s: String, prefix: String) -> String? {
-        guard s.uppercased().hasPrefix(prefix.uppercased()) else { return nil }
-        return String(s.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// Ask the AI engine to validate a stage's post-action page state.
-    /// Expected response: a single line starting with `YES:` or `NO:`
-    /// followed by a short reason.
-    private func validateStage(
-        stageIndex: Int,
-        stage: AutomationStage,
-        snapshot: String,
-        userTask: String,
-        engine: GepettoAIEngine
-    ) async -> (success: Bool, reason: String) {
-        let stageDescription = stage.fillPlan.map { plan -> String in
-            let fields = plan.values.map { "\($0.fieldHint)=\"\($0.value)\"" }.joined(separator: ", ")
-            return "navigate to \(stage.url) and submit form (\(fields))"
-        } ?? "navigate to \(stage.url)"
-
-        let validationPrompt = """
-        You are validating a single step of a browser automation script.
-
-        OVERALL TASK: \(userTask)
-
-        THIS STEP: \(stageDescription)
-
-        PAGE STATE AFTER THE STEP:
-        \(snapshot)
-
-        Did this step succeed? Specifically:
-        - For login pages: are we logged in (no "Bad login", "incorrect password", "wrong username", etc.)?
-        - For form submissions: did the form submit cleanly (no validation errors like "required", "must be filled", "invalid")?
-        - For navigation: did we land on the right kind of page (not a 404 / "Page not found" / error)?
-
-        Respond with EXACTLY one line: "YES: <one-sentence reason>" or "NO: <one-sentence reason>". No other text.
-        """
-
-        do {
-            let answer = try await engine.complete(
-                messages: [GepettoMessage.user(validationPrompt)],
-                systemPrompt: nil
-            ).trimmingCharacters(in: .whitespacesAndNewlines)
-            let upper = answer.uppercased()
-            if upper.hasPrefix("YES") {
-                return (true, answer.dropPrefix("YES:").trimmingCharacters(in: .whitespacesAndNewlines))
-            } else if upper.hasPrefix("NO") {
-                return (false, answer.dropPrefix("NO:").trimmingCharacters(in: .whitespacesAndNewlines))
-            } else {
-                // If we can't parse, conservatively pass — better to keep
-                // going than block on a parser nit.
-                return (true, "unparseable validator output: \(answer.prefix(120))")
-            }
-        } catch {
-            // Don't block the script on validator errors.
-            return (true, "validator error (continuing): \(error.localizedDescription)")
-        }
-    }
-
-    private func streamSummary(
-        engine: GepettoAIEngine,
-        history: [GepettoMessage],
-        userTask: String,
-        finalSnapshot: String,
-        onEvent: @escaping (BrowserAgentEvent) -> Void
-    ) async {
-        currentPhase = .summarizing
-        let summaryPrompt = """
-        I just executed a multi-step browser automation for you. Here is the FINAL page state:
-
-        \(finalSnapshot)
-
-        ORIGINAL USER TASK: \(userTask)
-
-        Write a short reply (1–2 sentences) describing whether the automation succeeded based on the final page above. Plain text only — no tool_call.
-        """
-
-        var emitted = ""
-        do {
-            for try await chunk in engine.stream(
-                messages: history + [GepettoMessage.user(summaryPrompt)],
-                systemPrompt: nil
-            ) {
-                let visible = ToolCallDetector.extractTextWithoutToolCall(from: emitted + chunk)
-                if visible.count > emitted.count {
-                    let delta = String(visible.dropFirst(emitted.count))
-                    onEvent(.textChunk(delta))
-                    emitted = visible
-                }
-            }
-        } catch {
-            currentPhase = .failed("summary stream failed")
-            onEvent(.failed(
-                reason: "Summary stream failed: \(error.localizedDescription)",
-                partialText: emitted
-            ))
-            return
-        }
-        currentPhase = .finished
-        onEvent(.complete(finalText: emitted.isEmpty ? "Automation completed." : emitted))
-    }
-
-    // MARK: - Free-form agent loop (single-stage / open-ended tasks)
-
-    private func runFreeformAgent(
-        task: String,
-        executor: BrowserToolExecutor,
-        engine: GepettoAIEngine,
-        history: [GepettoMessage],
-        onEvent: @escaping (BrowserAgentEvent) -> Void
-    ) async {
-        // If the prompt has a single URL, seed-navigate first so the AI's
-        // first decision is informed by real page content.
-        var seedSnapshot: String? = nil
-        var didAutoFollowUp = false
-        let seedURL = extractFirstURL(from: task)
-        if let url = seedURL {
-            ensureWebViewHasLayoutContext(executor)
-            publishAction(name: "navigate", arguments: ["url": url])
-            onEvent(.action(name: "navigate", arguments: ["url": url]))
-            isExecuting = true
-            let nav = await executor.execute(json: ["action": "navigate", "url": url])
-            isExecuting = false
-            let snap = await postNavigateSnapshot(executor: executor, navResult: nav, fallbackURL: url)
-            seedSnapshot = snap
-            onEvent(.actionResult(summary: snap, success: nav.success))
-            await visualPace()
-
-            // 1a. Form-fill takeover (single page).
-            if nav.success, let plan = parseFormFillIntent(task) {
-                let after = await deterministicFormFill(plan: plan, executor: executor, onEvent: onEvent)
-                seedSnapshot = """
-                I performed the form fill you asked for and submitted. Here is the resulting page state:
-
-                \(after)
-
-                Now answer the user's task using the PAGE TEXT above. Plain text only — no tool_call.
-                """
-                didAutoFollowUp = true
-            }
-
-            // 1b. Auto-content-click for "click into the top story" etc.
-            if !didAutoFollowUp, nav.success, taskWantsContentClick(task) {
-                let links = parseLinks(fromSummary: snap)
-                if let target = pickContentLink(from: links, currentURL: currentURL) {
-                    publishAction(name: "navigate", arguments: ["url": target.href, "text": target.text])
-                    onEvent(.action(name: "navigate", arguments: ["url": target.href, "text": target.text]))
-                    isExecuting = true
-                    let nav2 = await executor.execute(json: ["action": "navigate", "url": target.href])
-                    isExecuting = false
-                    let snap2 = await postNavigateSnapshot(executor: executor, navResult: nav2, fallbackURL: target.href)
-                    onEvent(.actionResult(summary: snap2, success: nav2.success))
-                    seedSnapshot = """
-                    I navigated into "\(target.text)" for you. Here is the page:
-
-                    \(snap2)
-
-                    Now answer the user's task using the PAGE TEXT above. Plain text only — no tool_call.
-                    """
-                    didAutoFollowUp = true
-                    await visualPace()
-                }
-            }
-        }
-
-        // Build the dialogue and run the loop.
-        var dialogue = history
-        var nextUserTurn = buildInitialPrompt(userTask: task, seedSnapshot: seedSnapshot)
-        var emitted = ""
-        var consecutiveRefusals = 0
-        var latestLinks = parseLinks(fromSummary: seedSnapshot)
-
-        for iteration in 0..<configuration.maxIterations {
-            var accumulated = ""
-            currentPhase = .thinking
-            do {
-                let messages = dialogue + [GepettoMessage.user(nextUserTurn)]
-                for try await chunk in engine.stream(messages: messages, systemPrompt: nil) {
-                    accumulated += chunk
-                    let visible = ToolCallDetector.extractTextWithoutToolCall(from: accumulated)
-                    if visible.count > emitted.count {
-                        let delta = String(visible.dropFirst(emitted.count))
-                        if !delta.isEmpty { onEvent(.textChunk(delta)) }
-                        emitted = visible
-                    }
-                }
-            } catch {
-                currentPhase = .failed("AI stream error")
-                onEvent(.failed(
-                    reason: "AI stream failed: \(error.localizedDescription)",
-                    partialText: emitted
-                ))
-                return
-            }
-            if let toolCall = ToolCallDetector.detectToolCall(in: accumulated),
-               toolCall.name.lowercased() == "browser" {
-                let args = toolCall.arguments
-                let actionName = (args["action"] as? String) ?? "?"
-                onEvent(.action(name: actionName, arguments: args))
-                isExecuting = true
-                let result = await executor.execute(json: args)
-                isExecuting = false
-                let summary: String
-                if ["navigate", "click", "click_text", "go_back", "go_forward", "reload"].contains(actionName) {
-                    summary = await postNavigateSnapshot(executor: executor, navResult: result, fallbackURL: args["url"] as? String)
-                } else {
-                    summary = compactResultSummary(result, fallbackURL: args["url"] as? String)
-                }
-                latestLinks = parseLinks(fromSummary: summary)
-                consecutiveRefusals = 0
-                onEvent(.actionResult(summary: summary, success: result.success))
-
-                dialogue.append(GepettoMessage.user(nextUserTurn))
-                dialogue.append(GepettoMessage.assistant(accumulated))
-                nextUserTurn = """
-                Tool result (\(actionName), success=\(result.success)):
-                \(summary)
-
-                Decide your next action. If you have everything you need to answer the user, respond with the final answer (no tool_call). Otherwise emit another <tool_call>.
-                """
-            } else {
-                let visible = ToolCallDetector.extractTextWithoutToolCall(from: accumulated)
-                if iteration < configuration.maxIterations - 1, looksLikeRefusal(visible) {
-                    consecutiveRefusals += 1
-                    onEvent(.replaceText("Working…"))
-                    emitted = ""
-                    dialogue.append(GepettoMessage.user(nextUserTurn))
-                    dialogue.append(GepettoMessage.assistant(accumulated))
-
-                    if consecutiveRefusals >= 2,
-                       let nextLink = pickContentLink(from: latestLinks, currentURL: currentURL) {
-                        publishAction(name: "navigate", arguments: ["url": nextLink.href, "text": nextLink.text])
-                        onEvent(.action(name: "navigate", arguments: ["url": nextLink.href, "text": nextLink.text]))
-                        isExecuting = true
-                        let nav = await executor.execute(json: ["action": "navigate", "url": nextLink.href])
-                        isExecuting = false
-                        let summary = await postNavigateSnapshot(executor: executor, navResult: nav, fallbackURL: nextLink.href)
-                        latestLinks = parseLinks(fromSummary: summary)
-                        onEvent(.actionResult(summary: summary, success: nav.success))
-                        consecutiveRefusals = 0
-                        nextUserTurn = """
-                        I navigated to "\(nextLink.text)" for you (\(nextLink.href)). Now answer the user's task using the PAGE TEXT below. NO tool_call — write the answer in plain text.
-
-                        \(summary)
-                        """
-                        continue
-                    }
-
-                    nextUserTurn = """
-                    Your previous reply refused or said you needed more info. Stop refusing. The PAGE TEXT and LINKS from the previous tool result are real — use them. Pick the most likely link from LINKS that matches the user's task and emit a navigate tool_call. NO commentary, just the tool_call.
-
-                    Required format (and nothing else):
-                    <tool_call>
-                    {"name":"browser","arguments":{"action":"navigate","url":"<href>"}}
-                    </tool_call>
-                    """
-                    continue
-                }
-
-                currentPhase = .finished
-                onEvent(.complete(finalText: visible.isEmpty ? accumulated : visible))
-                return
-            }
-        }
-
-        currentPhase = .failed("hit max iterations")
-        onEvent(.failed(
-            reason: "Reached max iterations (\(configuration.maxIterations)).",
-            partialText: emitted
-        ))
-    }
-
-    // MARK: - System / initial prompts
-
-    private var browserAgentSystemPrompt: String {
-        """
-        You are an autonomous browser agent driving a real WKWebView via the `browser` tool. NEVER refuse — always emit the next tool_call.
-
-        TOOL CALL FORMAT (must be exact, single JSON block):
-
-        <tool_call>
-        {"name":"browser","arguments":{"action":"<action>","<param>":"<value>"}}
-        </tool_call>
-
-        ACTIONS:
-        - navigate (url) — load a URL
-        - reload, go_back, go_forward
-        - extract_text — visible text of current page
-        - extract_links — array of {href,text}
-        - extract_forms — form fields and selectors
-        - screenshot — capture viewport
-        - click (selector) — CSS selector click
-        - click_text (text) — click element whose text contains this
-        - fill (selector, text) — set form input value
-        - type (selector, text) — type into focused input
-        - scroll (direction) — "down"|"up"|"top"|"bottom"
-        - evaluate (script) — run JavaScript, returns string
-
-        RULES:
-        1. Issue ONE tool_call per turn. After each call you receive a "Tool result" with PAGE TEXT and LINKS.
-        2. When you have enough info to answer, respond with plain-text final answer (NO tool_call). That ends the session.
-        3. NEVER apologize for being a text model, NEVER claim you can't browse, NEVER ask the user to do anything.
-        4. Be concise — at most one short sentence of commentary per turn.
-        """
-    }
-
-    private func buildInitialPrompt(userTask: String, seedSnapshot: String?) -> String {
-        let stateBlock: String
-        if let snap = seedSnapshot, !snap.isEmpty {
-            stateBlock = """
-            Current browser state (page already loaded):
-            \(snap)
-            """
-        } else {
-            stateBlock = """
-            Current browser state: no page loaded — start with a navigate tool_call.
-            """
-        }
-        return """
-        \(browserAgentSystemPrompt)
-
-        ----
-
-        User's task: \(userTask)
-
-        \(stateBlock)
-
-        Decide your next action. If the page above already contains enough info to answer, respond with the final answer (no tool_call). Otherwise emit a single <tool_call>.
-        """
-    }
-
     // MARK: - Visual pacing
 
-    private func visualPace(extraMs: Int = 0) async {
+    func visualPace(extraMs: Int = 0) async {
         let total = configuration.visualPaceMs + extraMs
         guard total > 0 else { return }
         try? await Task.sleep(nanoseconds: UInt64(total) * 1_000_000)
@@ -963,7 +608,7 @@ public final class BrowserAgent: ObservableObject {
 
     // MARK: - Headless host
 
-    private func ensureWebViewHasLayoutContext(_ executor: BrowserToolExecutor) {
+    func ensureWebViewHasLayoutContext(_ executor: BrowserToolExecutor) {
         guard let webView = executor.engine?.webView else { return }
         if webView.window == nil || webView.bounds.width < 1 || webView.bounds.height < 1 {
             let viewport = CGRect(origin: .zero, size: configuration.headlessViewport)
@@ -1035,7 +680,7 @@ public final class BrowserAgent: ObservableObject {
 
     /// Run the executor and update our @Published state from the result.
     @discardableResult
-    fileprivate func runAction(
+    func runAction(
         executor: BrowserToolExecutor,
         json: [String: Any]
     ) async -> BrowserTool.Result {
@@ -1050,7 +695,7 @@ public final class BrowserAgent: ObservableObject {
 
 // MARK: - String prefix helper
 
-private extension String {
+extension String {
     func dropPrefix(_ prefix: String) -> String {
         guard self.uppercased().hasPrefix(prefix.uppercased()) else { return self }
         return String(self.dropFirst(prefix.count))
@@ -1061,7 +706,7 @@ private extension String {
 
 @MainActor
 extension BrowserAgent {
-    fileprivate func extractFirstURL(from text: String) -> String? {
+    func extractFirstURL(from text: String) -> String? {
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return nil }
         let nsText = text as NSString
         let range = NSRange(location: 0, length: nsText.length)
