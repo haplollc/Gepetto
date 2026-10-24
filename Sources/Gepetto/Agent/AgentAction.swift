@@ -147,6 +147,31 @@ public struct AgentDecision: Sendable, Equatable {
 
 public enum AgentOutputParser {
 
+    /// Small models sometimes put the final answer in a JSON object
+    /// (`{"title": "…", "poster": "luu"}`). Turn that into lines a person
+    /// can read; prose is returned untouched.
+    public static func readableAnswer(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first, first == "{" || first == "[",
+              let data = trimmed.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) else { return raw }
+        func render(_ value: Any) -> String {
+            switch value {
+            case let text as String: return text
+            case let number as NSNumber: return number.stringValue
+            case let list as [Any]: return list.map(render).joined(separator: ", ")
+            case let dict as [String: Any]:
+                return dict.keys.sorted().map { key -> String in
+                    let label = key.replacingOccurrences(of: "_", with: " ")
+                    return "\(label.prefix(1).uppercased())\(label.dropFirst()): \(render(dict[key] ?? ""))"
+                }.joined(separator: "\n")
+            default: return "\(value)"
+            }
+        }
+        let rendered = render(object)
+        return rendered.isEmpty ? raw : rendered
+    }
+
     public enum Failure: Error, Equatable {
         case noJSON
         case noAction(String)

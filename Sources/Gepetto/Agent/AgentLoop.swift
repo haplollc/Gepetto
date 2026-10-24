@@ -190,7 +190,7 @@ extension BrowserAgent {
             case .done(let answerText, let success):
                 let step = step
                 await endStep(step, outcome: success ? "task complete" : "stopped", browser: browser, onEvent: onEvent)
-                let text = answerText.isEmpty ? (success ? "Done." : "I could not finish this task.") : answerText
+                let text = answerText.isEmpty ? (success ? "Done." : "I could not finish this task.") : AgentOutputParser.readableAnswer(answerText)
                 currentPhase = success ? .finished : .failed("gave up")
                 setControl(.finished(success: success))
                 onEvent(.complete(finalText: text))
@@ -555,7 +555,7 @@ extension BrowserAgent {
         {"action":"wait","seconds":2}                          let the page load
         {"action":"extract"}                                   read the whole page text
         {"action":"ask_user","question":"..."}                 you need the user: login, code, captcha, payment, a choice
-        {"action":"done","answer":"...","success":true}        finished; put the complete answer for the user in "answer"
+        {"action":"done","answer":"...","success":true}        finished; "answer" is your reply to the user in plain sentences (never JSON or key: value pairs)
 
         Reply format (all four keys, one line each):
         {"evaluation":"did the last step work, in one sentence","memory":"facts to keep, one line","thought":"what to do now and why","action":{...}}
@@ -565,6 +565,7 @@ extension BrowserAgent {
         - For search boxes use type with "submit":true.
         - Read VISIBLE TEXT before deciding; if it already answers the task, use done.
         - In done, only state facts you saw on a page. If something is missing, say so and set "success":false.
+        - Write the answer the way you would say it to a person: full sentences, no JSON, no field names.
         - Never ask the user to do something you can do yourself; never apologise or explain limits.
         - One action per reply. JSON only.
         """

@@ -100,4 +100,14 @@ final class AgentOutputParserTests: XCTestCase {
             XCTFail("unknown action should not parse")
         }
     }
+
+    func testReadableAnswerFlattensJSONObjects() {
+        let json = #"{"title": "Air Purifiers as White Noise Machines", "posted_by": "luu"}"#
+        XCTAssertEqual(AgentOutputParser.readableAnswer(json),
+                       "Posted by: luu\nTitle: Air Purifiers as White Noise Machines")
+        XCTAssertEqual(AgentOutputParser.readableAnswer(#"["a", "b"]"#), "a, b")
+        XCTAssertEqual(AgentOutputParser.readableAnswer("The top story is X, posted by luu."),
+                       "The top story is X, posted by luu.")
+        XCTAssertEqual(AgentOutputParser.readableAnswer("{not json"), "{not json")
+    }
 }
