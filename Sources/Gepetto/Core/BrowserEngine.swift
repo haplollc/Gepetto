@@ -51,10 +51,17 @@ public final class BrowserEngine: NSObject, ObservableObject {
     /// a stray tap cannot race the agent; on during a takeover and when idle.
     @Published public private(set) var acceptsUserInput: Bool = true
 
-    /// The last JavaScript alert / confirm the page showed. Alerts are
-    /// acknowledged and confirms accepted automatically; the text is kept so
-    /// the agent can tell the model what the page said.
+    /// The last JavaScript dialog the page showed and how it was answered,
+    /// for example `confirm: Delete this item? (answered Cancel)`. While the
+    /// agent drives, alerts are dismissed, prompts cancelled, and confirms
+    /// accepted unless their wording is destructive; while the person has the
+    /// page the dialog is parked in `pendingDialog` for the panel to show.
     @Published public private(set) var lastDialogMessage: String?
+
+    /// A dialog waiting for the person. Set only while `acceptsUserInput`;
+    /// answer it with `respond(to:ok:text:)`.
+    @Published public internal(set) var pendingDialog: BrowserDialog?
+    private var dialogCompletions: [UUID: (Bool, String?) -> Void] = [:]
     
     // MARK: - Internal State
     
@@ -234,6 +241,33 @@ public final class BrowserEngine: NSObject, ObservableObject {
         #if os(iOS)
         webView.isUserInteractionEnabled = enabled
         #endif
+        // A dialog left open for the person must not block the agent.
+        if !enabled, let dialog = pendingDialog { respond(to: dialog.id, ok: false) }
+    }
+
+    // MARK: - JavaScript dialogs
+
+    /// Answer a dialog parked in `pendingDialog`.
+    public func respond(to id: UUID, ok: Bool, text: String? = nil) {
+        guard let completion = dialogCompletions.removeValue(forKey: id) else { return }
+        if let dialog = pendingDialog, dialog.id == id {
+            pendingDialog = nil
+            lastDialogMessage = "\(dialog.kind): \(dialog.message) (answered by the user: \(ok ? "OK" : "Cancel"))"
+        }
+        completion(ok, text)
+    }
+
+    private func park(_ dialog: BrowserDialog, completion: @escaping (Bool, String?) -> Void) {
+        dialogCompletions[dialog.id] = completion
+        pendingDialog = dialog
+    }
+
+    /// How an unattended `confirm()` is answered: wording that would delete,
+    /// cancel or leave something is declined, anything else is accepted.
+    static func autoAnswer(confirm message: String) -> Bool {
+        let text = message.lowercased()
+        let destructive = ["delete", "remove", "discard", "cancel", "unsubscribe", "leave", "reset", "erase", "clear"]
+        return !destructive.contains { text.contains($0) }
     }
 
     /// Stop loading the current page.
@@ -943,24 +977,53 @@ extension BrowserEngine: WKUIDelegate {
         return nil
     }
 
-    // JavaScript dialogs would otherwise block an unattended run. Alerts are
-    // acknowledged, confirms accepted, prompts cancelled; the message is kept
-    // for the agent to report.
+    // JavaScript dialogs would otherwise block an unattended run. While the
+    // person has the page they are shown to them; otherwise alerts are
+    // dismissed, prompts cancelled, confirms answered by their wording, and
+    // the message is kept for the agent to report.
     public func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
                         initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
-        lastDialogMessage = message
+        if acceptsUserInput {
+            park(BrowserDialog(kind: .alert, message: message, defaultText: nil)) { _, _ in completionHandler() }
+            return
+        }
+        lastDialogMessage = "alert: \(message) (dismissed)"
         completionHandler()
     }
 
     public func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
                         initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
-        lastDialogMessage = message
-        completionHandler(true)
+        if acceptsUserInput {
+            park(BrowserDialog(kind: .confirm, message: message, defaultText: nil)) { ok, _ in completionHandler(ok) }
+            return
+        }
+        let ok = Self.autoAnswer(confirm: message)
+        lastDialogMessage = "confirm: \(message) (answered \(ok ? "OK" : "Cancel"))"
+        completionHandler(ok)
     }
 
     public func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?,
                         initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
-        lastDialogMessage = prompt
+        if acceptsUserInput {
+            park(BrowserDialog(kind: .prompt, message: prompt, defaultText: defaultText)) { ok, text in
+                completionHandler(ok ? (text ?? defaultText ?? "") : nil)
+            }
+            return
+        }
+        lastDialogMessage = "prompt: \(prompt) (cancelled)"
         completionHandler(nil)
+    }
+}
+
+/// A JavaScript dialog the page raised while the person had the page.
+public struct BrowserDialog: Identifiable, Sendable {
+    public enum Kind: String, Sendable { case alert, confirm, prompt }
+    public let id: UUID
+    public let kind: Kind
+    public let message: String
+    public let defaultText: String?
+
+    public init(id: UUID = UUID(), kind: Kind, message: String, defaultText: String?) {
+        self.id = id; self.kind = kind; self.message = message; self.defaultText = defaultText
     }
 }

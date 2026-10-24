@@ -7,6 +7,9 @@
 //  material below that. Chrome (the panel, buttons, cards, the toast) is
 //  glass; content (the page, text, the timeline) is plain.
 //
+//  Every control keeps its 36 pt glass visual and carries a transparent
+//  margin that brings the hit area to at least 44 by 44 pt.
+//
 
 import SwiftUI
 
@@ -27,6 +30,13 @@ enum AgentUI {
 
     static let padding: CGFloat = 16
     static let spacing: CGFloat = 8
+
+    /// The smallest hit area of any tappable control.
+    static let hitTarget: CGFloat = 44
+    /// The glass visual inside that hit area.
+    static let controlSize: CGFloat = 36
+    /// Transparent margin around a 36 pt control that makes it 44 pt to tap.
+    static let hitMargin: CGFloat = (hitTarget - controlSize) / 2
 
     static let title = Font.subheadline.weight(.semibold)
     static let body = Font.footnote
@@ -67,6 +77,14 @@ extension View {
             self
         }
     }
+
+    /// Widens the tappable area of a control to at least 44 by 44 pt without
+    /// touching what it draws. Apply after the glass, inside the button label.
+    func agentHitTarget() -> some View {
+        self
+            .frame(minWidth: AgentUI.hitTarget, minHeight: AgentUI.hitTarget)
+            .contentShape(Rectangle())
+    }
 }
 
 @available(iOS 26.0, macOS 26.0, *)
@@ -99,7 +117,8 @@ struct AgentPressStyle: ButtonStyle {
     }
 }
 
-/// A round glass button with one symbol.
+/// A round glass button with one symbol. 36 pt of glass inside a 44 pt
+/// hit area, so a row of them with zero stack spacing keeps 8 pt gaps.
 struct GlassIconButton: View {
     let symbol: String
     let label: String
@@ -110,9 +129,9 @@ struct GlassIconButton: View {
             Image(systemName: symbol)
                 .font(AgentUI.bodySemibold)
                 .foregroundStyle(.primary)
-                .frame(width: 36, height: 36)
-                .contentShape(Circle())
+                .frame(width: AgentUI.controlSize, height: AgentUI.controlSize)
                 .agentGlass(in: Circle(), interactive: true)
+                .agentHitTarget()
         }
         .buttonStyle(AgentPressStyle())
         .accessibilityLabel(label)
@@ -132,38 +151,12 @@ struct ProminentFill: ViewModifier {
 }
 
 /// A capsule with a label: glass, or the monochrome fill when `prominent`.
+/// The capsule is 36 pt tall; a 4 pt margin on every side makes it 44 pt
+/// to tap.
 struct GlassPillButton: View {
-    let title: String
-    let symbol: String
-    var prominent = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            let label = Label(title, systemImage: symbol)
-                .font(AgentUI.bodySemibold)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-                .padding(.horizontal, 14)
-                .frame(height: 36)
-                .contentShape(Capsule())
-            if prominent {
-                label.modifier(ProminentFill())
-            } else {
-                label.foregroundStyle(.primary).agentGlass(in: Capsule(), interactive: true)
-            }
-        }
-        .buttonStyle(AgentPressStyle())
-    }
-}
-
-/// Full-width button for cards. Glass, or the monochrome fill for the one
-/// primary action on a card.
-struct AgentCardButton: View {
     let title: String
     var symbol: String? = nil
     var prominent = false
-    var destructive = false
     let action: () -> Void
 
     var body: some View {
@@ -172,17 +165,77 @@ struct AgentCardButton: View {
                 if let symbol { Label(title, systemImage: symbol) } else { Text(title) }
             }
             .font(AgentUI.bodySemibold)
-            .frame(maxWidth: .infinity)
-            .frame(height: 40)
-            .contentShape(Capsule())
-            if prominent {
-                label.modifier(ProminentFill())
-            } else {
-                label.foregroundStyle(destructive ? Color.red : Color.primary).agentGlass(in: Capsule(), interactive: true)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.horizontal, 14)
+            .frame(height: AgentUI.controlSize)
+            Group {
+                if prominent {
+                    label.modifier(ProminentFill())
+                } else {
+                    label.foregroundStyle(.primary).agentGlass(in: Capsule(), interactive: true)
+                }
             }
+            .padding(.horizontal, AgentUI.hitMargin)
+            .agentHitTarget()
         }
         .buttonStyle(AgentPressStyle())
     }
+}
+
+/// Full-width button for cards. Glass, or the monochrome fill for the one
+/// primary action on a card. The capsule is 40 pt tall inside a 44 pt hit
+/// area; disabled, it fades and stays monochrome.
+struct AgentCardButton: View {
+    let title: String
+    var symbol: String? = nil
+    var prominent = false
+    var destructive = false
+    let action: () -> Void
+
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        Button(action: action) {
+            let label = Group {
+                if let symbol { Label(title, systemImage: symbol) } else { Text(title) }
+            }
+            .font(AgentUI.bodySemibold)
+            .lineLimit(1)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity)
+            .frame(height: 40)
+            Group {
+                if prominent {
+                    label.modifier(ProminentFill())
+                } else {
+                    label.foregroundStyle(destructive ? Color.red : Color.primary).agentGlass(in: Capsule(), interactive: true)
+                }
+            }
+            .opacity(isEnabled ? 1 : 0.4)
+            .agentHitTarget()
+        }
+        .buttonStyle(AgentPressStyle())
+    }
+}
+
+// MARK: - Fields
+
+/// The one text field style on a card: a plain field on an inset shape,
+/// 44 pt tall so it is as easy to hit as a button.
+struct AgentFieldStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .textFieldStyle(.plain)
+            .font(AgentUI.body)
+            .padding(.horizontal, 12)
+            .frame(height: AgentUI.hitTarget)
+            .background(RoundedRectangle(cornerRadius: AgentUI.radiusSmall, style: .continuous).fill(AgentUI.inset))
+    }
+}
+
+extension View {
+    func agentField() -> some View { modifier(AgentFieldStyle()) }
 }
 
 // MARK: - Symbols

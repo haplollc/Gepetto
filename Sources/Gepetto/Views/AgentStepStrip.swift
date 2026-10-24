@@ -67,23 +67,28 @@ struct AgentThoughtLine: View {
 }
 
 /// Horizontal timeline. The current step is primary; earlier ones recede.
+/// Each 28 pt chip is a button with a 44 pt hit area; the 8 pt of margin
+/// above and below it supply the row's visual spacing.
 struct AgentStepStrip: View {
     let steps: [AgentStep]
     @State private var expanded: UUID?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(steps) { step in
-                            StepChip(step: step, isCurrent: step.id == steps.last?.id, isExpanded: expanded == step.id)
-                                .onTapGesture {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        expanded = expanded == step.id ? nil : step.id
-                                    }
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    expanded = expanded == step.id ? nil : step.id
                                 }
-                                .id(step.id)
+                            } label: {
+                                StepChip(step: step, isCurrent: step.id == steps.last?.id, isExpanded: expanded == step.id)
+                                    .agentHitTarget()
+                            }
+                            .buttonStyle(AgentPressStyle())
+                            .id(step.id)
                         }
                     }
                     .padding(.horizontal, AgentUI.padding)
