@@ -498,6 +498,7 @@ extension BrowserAgent {
         done.duration = Date().timeIntervalSince(step.startedAt)
         done.url = browser.currentURL?.absoluteString ?? currentURL ?? ""
         steps.append(done)
+        saveSessions()
         isExecuting = false
         activeTargetFrame = nil
         await browser.clearHighlight()

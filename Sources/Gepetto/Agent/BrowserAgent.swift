@@ -363,10 +363,22 @@ public final class BrowserAgent: ObservableObject {
         self.configuration = configuration
     }
 
+    /// Remember sign-ins between runs (see `SessionVault`). Set it before
+    /// `start()`: with a vault the web view keeps cookies in memory only,
+    /// and the vault restores them at the start of each run and saves them
+    /// after every step, after a hand-back and when the run ends.
+    public var sessionVault: SessionVault?
+
+    /// Save the browser's sign-ins to the vault, if there is one.
+    func saveSessions() {
+        guard let vault = sessionVault, let store = executor?.engine?.webView.configuration.websiteDataStore.httpCookieStore else { return }
+        Task { @MainActor in await vault.save(from: store) }
+    }
+
     /// Boot the underlying browser session. Idempotent.
     public func start() {
         guard executor == nil else { return }
-        let exec = BrowserToolExecutor()
+        let exec = BrowserToolExecutor(configuration: sessionVault == nil ? .default : BrowserConfiguration(usesEphemeralDataStore: true))
         if Thread.isMainThread {
             exec.start()
         } else {
@@ -388,6 +400,7 @@ public final class BrowserAgent: ObservableObject {
 
     /// Tear down the browser session and release resources.
     public func shutdown() {
+        saveSessions()
         stop()
         executor?.stop()
         executor = nil
@@ -467,6 +480,8 @@ public final class BrowserAgent: ObservableObject {
     /// model ("I logged in, use my account").
     public func handBack(note: String? = nil) {
         guard controlState.isHumanDriving else { return }
+        // The person may have just signed in: keep it.
+        saveSessions()
         resumeUser(with: .handedBack(note: note))
     }
 
@@ -616,6 +631,10 @@ public final class BrowserAgent: ObservableObject {
             return
         }
 
+        if let vault = sessionVault, let store = executor.engine?.webView.configuration.websiteDataStore.httpCookieStore {
+            await vault.restore(into: store)
+        }
+
         // Fresh run state.
         self.task = task
         steps = []
@@ -655,6 +674,7 @@ public final class BrowserAgent: ObservableObject {
             history: history,
             onEvent: onEvent
         )
+        saveSessions()
     }
 
     // MARK: - Visual pacing
