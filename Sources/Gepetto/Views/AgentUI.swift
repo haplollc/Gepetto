@@ -144,9 +144,13 @@ struct GlassIconButton: View {
 struct ProminentFill: ViewModifier {
     @Environment(\.colorScheme) private var scheme
     func body(content: Content) -> some View {
+        let dark = scheme == .dark
         content
-            .foregroundStyle(scheme == .dark ? Color.black : Color.white)
-            .background(Capsule().fill(Color.primary))
+            .foregroundStyle(dark ? Color.black : Color.white)
+            // Explicit black and white: inside a GlassEffectContainer
+            // `.primary` resolves to a translucent vibrant tint and the fill
+            // reads as grey.
+            .background(Capsule().fill(dark ? Color.white : Color.black))
     }
 }
 
