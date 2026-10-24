@@ -2,22 +2,22 @@
 //  AgentOverlays.swift
 //  Gepetto
 //
-//  The layers that sit on top of the live web view while an agent runs:
-//  an animated cursor that moves to each target, a touch blocker so a
-//  stray tap can't race the agent, and the cards for hand-over, approval
-//  and questions. All native SwiftUI; nothing here touches the DOM.
+//  The layers that sit on top of the live page while an agent runs: a
+//  pointer that moves to each target, a touch blocker so a stray tap can't
+//  race the agent, and the cards for hand-over and approval. All native
+//  SwiftUI; nothing here touches the DOM.
 //
 
 import SwiftUI
 
 // MARK: - Cursor
 
-/// A translucent pointer that glides to the element the agent is about to
-/// act on and ripples when it gets there.
+/// A pointer that moves to the element the agent is about to act on and
+/// ripples once when it arrives. Motion is driven by actions, never idle.
 struct AgentCursorView: View {
     let target: CGRect?
-    let accent: Color
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var position: CGPoint = .zero
     @State private var visible = false
     @State private var ripple = false
@@ -26,36 +26,39 @@ struct AgentCursorView: View {
     var body: some View {
         ZStack {
             if visible {
+                if !reduceMotion {
+                    Circle()
+                        .stroke(Color.primary.opacity(0.45), lineWidth: 1.5)
+                        .frame(width: 22, height: 22)
+                        .scaleEffect(ripple ? 2.4 : 0.6)
+                        .opacity(ripple ? 0 : 0.9)
+                        .id(rippleID)
+                }
                 Circle()
-                    .stroke(accent.opacity(0.55), lineWidth: 2)
-                    .frame(width: 22, height: 22)
-                    .scaleEffect(ripple ? 2.6 : 0.6)
-                    .opacity(ripple ? 0 : 0.9)
-                    .id(rippleID)
-                Circle()
-                    .fill(accent.opacity(0.82))
-                    .frame(width: 18, height: 18)
-                    .overlay(Circle().stroke(.white, lineWidth: 2))
-                    .shadow(color: accent.opacity(0.45), radius: 8, y: 2)
+                    .fill(Color.black.opacity(0.85))
+                    .frame(width: 16, height: 16)
+                    .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
+                    .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
             }
         }
         .position(position)
         .allowsHitTesting(false)
         .onChange(of: target) { newValue in
             guard let rect = newValue else {
-                withAnimation(.easeOut(duration: 0.25)) { visible = false }
+                withAnimation(.easeOut(duration: 0.2)) { visible = false }
                 return
             }
             let center = CGPoint(x: rect.midX, y: rect.midY)
             if !visible {
-                position = CGPoint(x: center.x + 40, y: center.y + 60)
-                withAnimation(.easeOut(duration: 0.2)) { visible = true }
+                position = reduceMotion ? center : CGPoint(x: center.x + 36, y: center.y + 48)
+                withAnimation(.easeOut(duration: 0.15)) { visible = true }
             }
-            withAnimation(.spring(response: 0.55, dampingFraction: 0.82)) { position = center }
+            withAnimation(reduceMotion ? .easeOut(duration: 0.1) : .smooth(duration: 0.45)) { position = center }
+            guard !reduceMotion else { return }
             rippleID += 1
             ripple = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-                withAnimation(.easeOut(duration: 0.6)) { ripple = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                withAnimation(.easeOut(duration: 0.5)) { ripple = true }
             }
         }
     }
@@ -80,137 +83,77 @@ struct InteractionBlocker: View {
     }
 }
 
-// MARK: - Shared card chrome
+// MARK: - Cards
 
+/// One glass surface, leading-aligned content, nothing nested.
 struct AgentCard<Content: View>: View {
-    let accent: Color
     @ViewBuilder var content: Content
 
     var body: some View {
         content
-            .padding(16)
-            .frame(maxWidth: 420)
-            .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(.regularMaterial)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .stroke(Color.primary.opacity(0.1), lineWidth: 0.5)
-            )
-            .shadow(color: .black.opacity(0.18), radius: 22, y: 10)
+            .padding(AgentUI.padding)
+            .frame(maxWidth: 440, alignment: .leading)
+            .agentGlass(in: RoundedRectangle(cornerRadius: AgentUI.radius, style: .continuous))
     }
 }
-
-struct AgentCardButtonStyle: ButtonStyle {
-    enum Kind { case primary, secondary, destructive }
-    let kind: Kind
-    let accent: Color
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.subheadline.weight(.semibold))
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity)
-            .foregroundStyle(foreground)
-            .background(Capsule().fill(background))
-            .overlay(Capsule().stroke(Color.primary.opacity(kind == .secondary ? 0.12 : 0), lineWidth: 0.5))
-            .opacity(configuration.isPressed ? 0.75 : 1)
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
-    }
-
-    private var foreground: Color {
-        switch kind {
-        case .primary:     return .white
-        case .secondary:   return .primary
-        case .destructive: return .red
-        }
-    }
-
-    private var background: AnyShapeStyle {
-        switch kind {
-        case .primary:     return AnyShapeStyle(accent)
-        case .secondary:   return AnyShapeStyle(Color.primary.opacity(0.06))
-        case .destructive: return AnyShapeStyle(Color.red.opacity(0.1))
-        }
-    }
-}
-
-// MARK: - Hand-over card
 
 /// Shown while the person has the page. Says what to do, then hands back.
 struct TakeoverCard: View {
     let reason: TakeoverReason
     let host: String?
-    let accent: Color
     let onHandBack: (String?) -> Void
     let onStop: () -> Void
 
     @State private var note = ""
-    @FocusState private var noteFocused: Bool
 
     var body: some View {
-        AgentCard(accent: accent) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 10) {
-                    ZStack {
-                        Circle().fill(accent.opacity(0.15)).frame(width: 34, height: 34)
-                        Image(systemName: symbol)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(accent)
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(reason.title)
-                            .font(.headline)
-                        Text(instruction)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+        AgentCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Label {
+                    Text(reason.title).font(AgentUI.title)
+                } icon: {
+                    DrawOnSymbol(name: symbol, font: AgentUI.title).id(symbol)
                 }
+                Text(instruction)
+                    .font(AgentUI.body)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if showsAddressWarning {
-                    Label("Check the address before you enter a password or a code.", systemImage: "lock.shield")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text("Check the address before you enter a password or a code.")
+                        .font(AgentUI.caption)
+                        .foregroundStyle(.tertiary)
                 }
                 TextField("Tell the agent what you did (optional)", text: $note)
                     .textFieldStyle(.plain)
-                    .font(.subheadline)
+                    .font(AgentUI.body)
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.06)))
-                    .focused($noteFocused)
+                    .frame(height: 36)
+                    .background(RoundedRectangle(cornerRadius: AgentUI.radiusSmall, style: .continuous).fill(AgentUI.inset))
                     .onSubmit { onHandBack(note.isEmpty ? nil : note) }
-                HStack(spacing: 10) {
-                    Button("Stop", action: onStop)
-                        .buttonStyle(AgentCardButtonStyle(kind: .destructive, accent: accent))
-                        .frame(maxWidth: 110)
-                    Button {
+                HStack(spacing: AgentUI.spacing) {
+                    AgentCardButton(title: "Stop", destructive: true, action: onStop)
+                        .frame(maxWidth: 96)
+                    AgentCardButton(title: "Hand back", symbol: "arrow.uturn.backward", prominent: true) {
                         onHandBack(note.isEmpty ? nil : note)
-                    } label: {
-                        Label("Hand back to agent", systemImage: "arrow.uturn.backward")
                     }
-                    .buttonStyle(AgentCardButtonStyle(kind: .primary, accent: accent))
                 }
+                .agentGlassContainer()
             }
         }
     }
 
     private var symbol: String {
         switch reason {
-        case .userInitiated:                   return "hand.raised.fill"
-        case .blocker(.captcha):               return "checkmark.shield"
-        case .blocker(.login):                 return "person.badge.key"
-        case .blocker(.twoFactor):             return "number.square"
-        case .blocker(.payment):               return "creditcard"
-        case .agentAsked:                      return "questionmark.bubble"
+        case .userInitiated:          return "hand.raised"
+        case .blocker(.captcha):      return "checkmark.shield"
+        case .blocker(.login):        return "person.badge.key"
+        case .blocker(.twoFactor):    return "number"
+        case .blocker(.payment):      return "creditcard"
+        case .agentAsked:             return "questionmark.bubble"
         }
     }
 
-    /// One sentence saying what to do now, in the style of "Sign in to
-    /// github.com in this tab, then hand back."
+    /// One sentence saying what to do now: "Sign in to github.com in this tab, then hand back."
     private var instruction: String {
         let site = host ?? "this page"
         switch reason {
@@ -229,43 +172,32 @@ struct TakeoverCard: View {
     }
 }
 
-// MARK: - Approval card
-
 /// "Allow this action?" for purchases, sends, deletes.
 struct ApprovalCard: View {
     let summary: String
     let category: SensitiveActionCategory
-    let accent: Color
     let onDecision: (Bool) -> Void
 
     var body: some View {
-        AgentCard(accent: accent) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 10) {
-                    ZStack {
-                        Circle().fill(Color.orange.opacity(0.15)).frame(width: 34, height: 34)
-                        Image(systemName: symbol)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(.orange)
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Allow this action?")
-                            .font(.headline)
-                        Text(summary)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+        AgentCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Label {
+                    Text("Allow this action?").font(AgentUI.title)
+                } icon: {
+                    DrawOnSymbol(name: symbol, font: AgentUI.title)
                 }
-                Text("Asked because it looks like \(reason).")
-                    .font(.caption)
+                Text(summary)
+                    .font(AgentUI.body)
                     .foregroundStyle(.secondary)
-                HStack(spacing: 10) {
-                    Button("Deny") { onDecision(false) }
-                        .buttonStyle(AgentCardButtonStyle(kind: .secondary, accent: accent))
-                    Button("Allow") { onDecision(true) }
-                        .buttonStyle(AgentCardButtonStyle(kind: .primary, accent: accent))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Asked because it looks like \(reason).")
+                    .font(AgentUI.caption)
+                    .foregroundStyle(.tertiary)
+                HStack(spacing: AgentUI.spacing) {
+                    AgentCardButton(title: "Deny") { onDecision(false) }
+                    AgentCardButton(title: "Allow", prominent: true) { onDecision(true) }
                 }
+                .agentGlassContainer()
             }
         }
     }
@@ -294,20 +226,16 @@ struct ApprovalCard: View {
 struct OutcomeToast: View {
     let success: Bool
     let text: String
-    let accent: Color
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: success ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                .foregroundStyle(success ? Color.green : Color.red)
-            Text(text)
-                .font(.footnote.weight(.medium))
-                .lineLimit(2)
+        Label {
+            Text(text).font(AgentUI.bodyMedium).lineLimit(2)
+        } icon: {
+            DrawOnSymbol(name: success ? "checkmark.circle" : "xmark.circle",
+                         font: AgentUI.bodySemibold, color: success ? .green : .red)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(Capsule().fill(.regularMaterial))
-        .overlay(Capsule().stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.15), radius: 12, y: 6)
+        .frame(height: 40)
+        .agentGlass(in: Capsule())
     }
 }

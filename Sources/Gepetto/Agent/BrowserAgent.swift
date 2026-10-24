@@ -207,11 +207,17 @@ public struct BrowserAgentConfiguration: Sendable {
     /// Template for the `search` action; `%@` is replaced by the escaped query.
     public var searchURLTemplate: String
 
-    /// Accent colour (CSS) for in-page marks and highlights.
+    /// Colour (CSS) for in-page marks and highlights. Monochrome by default;
+    /// the badges carry a white halo so they read on dark pages too.
     public var accentCSSColor: String
 
     /// How many recent steps the model is reminded of each turn.
     public var historyWindow: Int
+
+    /// Add a little random time (0–600 ms) around the visual pace so steps
+    /// do not land on a metronome. Sites rate-limit by rhythm as much as by
+    /// volume, and the result reads more naturally while watching.
+    public var naturalPacing: Bool
 
     public init(
         maxIterations: Int = 25,
@@ -227,8 +233,9 @@ public struct BrowserAgentConfiguration: Sendable {
         handOverBlockers: Set<PageBlocker> = [.captcha, .twoFactor, .payment],
         sensitiveActions: SensitiveActionRules = .default,
         searchURLTemplate: String = "https://html.duckduckgo.com/html/?q=%@",
-        accentCSSColor: String = "#007CF8",
-        historyWindow: Int = 8
+        accentCSSColor: String = "#111111",
+        historyWindow: Int = 8,
+        naturalPacing: Bool = true
     ) {
         self.maxIterations = maxIterations
         self.validateEachStage = validateEachStage
@@ -245,6 +252,7 @@ public struct BrowserAgentConfiguration: Sendable {
         self.searchURLTemplate = searchURLTemplate
         self.accentCSSColor = accentCSSColor
         self.historyWindow = historyWindow
+        self.naturalPacing = naturalPacing
     }
 
     public static let `default` = BrowserAgentConfiguration()
@@ -601,7 +609,8 @@ public final class BrowserAgent: ObservableObject {
     // MARK: - Visual pacing
 
     func visualPace(extraMs: Int = 0) async {
-        let total = configuration.visualPaceMs + extraMs
+        var total = configuration.visualPaceMs + extraMs
+        if configuration.naturalPacing { total += Int.random(in: 0...600) }
         guard total > 0 else { return }
         try? await Task.sleep(nanoseconds: UInt64(total) * 1_000_000)
     }

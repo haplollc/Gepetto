@@ -199,7 +199,7 @@ extension BrowserEngine {
     // MARK: - Overlays
 
     /// Draw numbered badges on every element in the last snapshot.
-    public func showMarks(accent: String = "#007CF8") async {
+    public func showMarks(accent: String = "#111111") async {
         _ = try? await call("showMarks", [accent])
     }
 
@@ -208,7 +208,7 @@ extension BrowserEngine {
     }
 
     /// Ring the element the agent is about to act on.
-    public func highlight(index: Int, accent: String = "#007CF8", label: String? = nil) async {
+    public func highlight(index: Int, accent: String = "#111111", label: String? = nil) async {
         _ = try? await call("highlight", [index, accent, label ?? ""])
     }
 

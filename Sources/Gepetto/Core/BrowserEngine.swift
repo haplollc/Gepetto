@@ -92,9 +92,12 @@ public final class BrowserEngine: NSObject, ObservableObject {
         prefs.allowsContentJavaScript = true
         webConfig.defaultWebpagePreferences = prefs
         
-        // User agent
+        // User agent: a custom application name wins; otherwise present as
+        // Safari on this device (see BrowserConfiguration.presentsAsSafari).
         if let customUserAgent = configuration.userAgent {
             webConfig.applicationNameForUserAgent = customUserAgent
+        } else if configuration.presentsAsSafari {
+            webConfig.applicationNameForUserAgent = BrowserConfiguration.safariApplicationName
         }
 
         // Page observation script (window.__gepetto) in every frame.

@@ -376,8 +376,27 @@ enum PageScript {
         } else {
           var proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
           var setter = Object.getOwnPropertyDescriptor(proto, 'value');
-          if (setter && setter.set) setter.set.call(el, value); else el.value = value;
+          function setValue(v) { if (setter && setter.set) setter.set.call(el, v); else el.value = v; }
+          // Clear, then type one character at a time so key handlers,
+          // autocomplete lists and framework state see ordinary keystrokes.
+          setValue('');
           el.dispatchEvent(new Event('input', { bubbles: true }));
+          var chars = Array.from(String(value));
+          if (chars.length <= 120) {
+            for (var ci = 0; ci < chars.length; ci++) {
+              var ch = chars[ci];
+              var kopt = { bubbles: true, cancelable: true, key: ch, code: ch === ' ' ? 'Space' : 'Key' + ch.toUpperCase(), charCode: ch.charCodeAt(0), keyCode: ch.charCodeAt(0), which: ch.charCodeAt(0) };
+              if (!el.dispatchEvent(new KeyboardEvent('keydown', kopt))) continue;
+              el.dispatchEvent(new KeyboardEvent('keypress', kopt));
+              setValue((el.value || '') + ch);
+              el.dispatchEvent(new InputEvent('input', { bubbles: true, data: ch, inputType: 'insertText' }));
+              el.dispatchEvent(new KeyboardEvent('keyup', kopt));
+            }
+          }
+          if (el.value !== value) {
+            setValue(value);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+          }
           el.dispatchEvent(new Event('change', { bubbles: true }));
         }
         if (submit) {
@@ -509,7 +528,7 @@ enum PageScript {
       }
 
       NS.showMarks = function (accent) {
-        accent = accent || '#007CF8';
+        accent = accent || '#111111';
         var o = overlay();
         o.innerHTML = '';
         for (var i = 0; i < lastIndexToRef.length; i++) {
@@ -519,11 +538,11 @@ enum PageScript {
           if (r.width < 1 || r.height < 1) continue;
           var box = document.createElement('div');
           box.style.cssText = 'position:absolute;left:' + (r.left + off.x) + 'px;top:' + (r.top + off.y) + 'px;width:' + r.width + 'px;height:' + r.height + 'px;' +
-            'border:1.5px solid ' + accent + ';border-radius:6px;box-sizing:border-box;opacity:.85;';
+            'border:1px solid ' + accent + ';border-radius:5px;box-sizing:border-box;opacity:.7;box-shadow:0 0 0 1px rgba(255,255,255,.7);';
           var tag = document.createElement('div');
           tag.textContent = String(i);
-          tag.style.cssText = 'position:absolute;left:-2px;top:-10px;transform:translateY(-100%);background:' + accent + ';color:#fff;font-size:11px;font-weight:600;' +
-            'line-height:16px;padding:0 5px;border-radius:5px;box-shadow:0 1px 3px rgba(0,0,0,.3);white-space:nowrap;';
+          tag.style.cssText = 'position:absolute;left:-1px;top:-6px;transform:translateY(-100%);background:' + accent + ';color:#fff;font-size:10px;font-weight:600;' +
+            'line-height:15px;padding:0 4px;border-radius:4px;box-shadow:0 0 0 1px rgba(255,255,255,.85),0 1px 2px rgba(0,0,0,.3);white-space:nowrap;font-variant-numeric:tabular-nums;';
           if (r.top + off.y < 20) { tag.style.top = '2px'; tag.style.transform = 'none'; }
           box.appendChild(tag);
           o.appendChild(box);
@@ -534,7 +553,7 @@ enum PageScript {
       NS.hideMarks = function () { var o = document.getElementById('__gep_overlay'); if (o) o.innerHTML = ''; return true; };
 
       NS.highlight = function (target, accent, label) {
-        accent = accent || '#007CF8';
+        accent = accent || '#111111';
         var el = resolve(target);
         if (!el) return false;
         var o = overlay();
@@ -542,13 +561,13 @@ enum PageScript {
         var ring = document.createElement('div');
         ring.className = '__gep_ring';
         ring.style.cssText = 'position:absolute;left:' + (r.left + off.x - 4) + 'px;top:' + (r.top + off.y - 4) + 'px;width:' + (r.width + 8) + 'px;height:' + (r.height + 8) + 'px;' +
-          'border:2px solid ' + accent + ';border-radius:9px;box-sizing:border-box;box-shadow:0 0 0 4px ' + accent + '33, 0 4px 16px ' + accent + '55;' +
+          'border:2px solid ' + accent + ';border-radius:8px;box-sizing:border-box;box-shadow:0 0 0 1px rgba(255,255,255,.85), 0 4px 14px rgba(0,0,0,.25);' +
           'transition:opacity .4s ease;';
         if (label) {
           var tag = document.createElement('div');
           tag.textContent = label;
           tag.style.cssText = 'position:absolute;left:0;top:-8px;transform:translateY(-100%);background:' + accent + ';color:#fff;font-size:12px;font-weight:600;' +
-            'line-height:20px;padding:0 8px;border-radius:7px;box-shadow:0 2px 6px rgba(0,0,0,.25);white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis;';
+            'line-height:20px;padding:0 8px;border-radius:6px;box-shadow:0 0 0 1px rgba(255,255,255,.85),0 2px 6px rgba(0,0,0,.25);white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis;';
           ring.appendChild(tag);
         }
         var olds = o.querySelectorAll('.__gep_ring'); for (var i = 0; i < olds.length; i++) olds[i].remove();

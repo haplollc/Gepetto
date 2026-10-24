@@ -80,14 +80,14 @@ struct ChatScreen: View {
     @StateObject var agent = BrowserAgent()
 
     var body: some View {
-        AgentBrowserPanel(agent: agent, stageHeight: 380, accent: .blue) {
+        AgentBrowserPanel(agent: agent, stageHeight: 380) {
             agent.shutdown()
         }
     }
 }
 ```
 
-The panel is the whole experience: the page with numbered marks on everything the model can see, a cursor that moves to each target, the thought line, the timeline, and buttons for **Pause**, **Take over** and **Stop**. When the agent needs the person, a card appears on the page itself.
+The panel is the whole experience: the page with numbered marks on everything the model can see, a cursor that moves to each target, the site's favicon, the thought line, the timeline, and buttons for **Pause**, **Take over** and **Stop**. When the agent needs the person, a card appears on the page itself. Chrome is Liquid Glass on iOS 26 / macOS 26 and a material before that; the look is monochrome, with symbols that draw themselves on.
 
 ## Letting people take over
 
@@ -181,9 +181,19 @@ config.highlightTargets = true          // ring + cursor on the element being ac
 config.autoDismissConsent = true
 config.handOverBlockers = [.captcha, .twoFactor, .payment]
 config.searchURLTemplate = "https://html.duckduckgo.com/html/?q=%@"
-config.accentCSSColor = "#007CF8"
+config.accentCSSColor = "#111111"   // in-page marks; monochrome by default
+config.naturalPacing = true         // a little jitter between steps
 let agent = BrowserAgent(configuration: config)
 ```
+
+### Behaving like a person's browser
+
+Gepetto runs in the person's own WebKit, with their cookies, on their device and network, so sites see a normal visitor. Two things help that stay true:
+
+- `BrowserConfiguration.presentsAsSafari` (on by default) sets the application-name part of the user agent to what Safari uses on this OS, so sites serve their normal pages and sign-in flows that refuse embedded web views (Google's OAuth, for one) work during a takeover.
+- Typing dispatches real keystrokes one character at a time, clicks send the full pointer sequence, and steps are paced with a little jitter.
+
+Gepetto does not try to defeat bot checks. When a site presents a captcha or a verification step, the agent hands the page to the person; that is what the takeover is for.
 
 Tasks that name two or more URLs ("log in at A, then post at B") still run as deterministic stages with AI validation and recovery, as before.
 

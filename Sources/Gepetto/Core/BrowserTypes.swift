@@ -22,6 +22,14 @@ public struct BrowserConfiguration: Sendable {
     
     /// Whether to block images for faster loading
     public let blockImages: Bool
+
+    /// Identify as Safari on this device rather than as a bare in-app web
+    /// view. Sites serve their normal pages to Safari, while many give an
+    /// unnamed WKWebView a degraded or blocked experience (Google's OAuth
+    /// refuses "embedded" browsers outright, which would break sign-in
+    /// during a takeover). This only sets the application name part of
+    /// the user agent; it does not change what the engine is.
+    public let presentsAsSafari: Bool
     
     /// Default configuration
     public static let `default` = BrowserConfiguration()
@@ -33,12 +41,25 @@ public struct BrowserConfiguration: Sendable {
         userAgent: String? = nil,
         navigationTimeout: TimeInterval = 30,
         javaScriptEnabled: Bool = true,
-        blockImages: Bool = false
+        blockImages: Bool = false,
+        presentsAsSafari: Bool = true
     ) {
         self.userAgent = userAgent
         self.navigationTimeout = navigationTimeout
         self.javaScriptEnabled = javaScriptEnabled
         self.blockImages = blockImages
+        self.presentsAsSafari = presentsAsSafari
+    }
+
+    /// The application-name suffix Safari uses on this OS version, e.g.
+    /// "Version/26.0 Mobile/15E148 Safari/604.1" on iOS.
+    public static var safariApplicationName: String {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        #if os(iOS)
+        return "Version/\(v.majorVersion).\(v.minorVersion) Mobile/15E148 Safari/604.1"
+        #else
+        return "Version/\(v.majorVersion).\(v.minorVersion) Safari/605.1.15"
+        #endif
     }
 }
 
