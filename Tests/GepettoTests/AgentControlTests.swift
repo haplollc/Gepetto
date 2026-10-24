@@ -216,6 +216,16 @@ final class AgentControlTests: XCTestCase {
         XCTAssertTrue(AgentLoopHeuristics.taskAsksForPageAction("Open https://httpbin.org/forms/post and order a large pizza for Jared, then submit the order."))
         XCTAssertTrue(AgentLoopHeuristics.taskAsksForPageAction("I want to book a table for two tonight."))
     }
+
+    @MainActor
+    func testTaskURLsNeedARealTopLevelDomain() {
+        let agent = BrowserAgent()
+        XCTAssertNil(agent.extractFirstURL(from: "Which has more stars on GitHub, Ollama or llama.cpp?"))
+        XCTAssertNil(agent.extractFirstURL(from: "Summarize config.json and notes.txt for me"))
+        XCTAssertEqual(agent.extractFirstURL(from: "Log in to saucedemo.com and add the backpack"), "https://saucedemo.com")
+        XCTAssertEqual(agent.extractFirstURL(from: "open www.example.dev/docs please"), "https://www.example.dev/docs")
+        XCTAssertEqual(agent.extractFirstURL(from: "Go to https://news.ycombinator.com/show now"), "https://news.ycombinator.com/show")
+    }
 }
 
 /// An engine that never says anything, for tests that must not reach a model.

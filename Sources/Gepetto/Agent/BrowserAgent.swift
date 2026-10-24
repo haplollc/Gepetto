@@ -783,14 +783,30 @@ extension BrowserAgent {
            let url = match.url, let scheme = url.scheme, scheme.hasPrefix("http") {
             return BrowserAgent.preferringHTTPS(url.absoluteString, in: text)
         }
-        let pattern = #"\b([a-z0-9-]+\.)+[a-z]{2,}(\/[\w\-./?%&=#+]*)?"#
-        if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-           let m = regex.firstMatch(in: text, options: [], range: range),
-           let r = Range(m.range, in: text) {
-            return "https://" + String(text[r])
+        // A bare host ("saucedemo.com/inventory"), but only with a real
+        // top-level domain: "llama.cpp", "config.json" or "notes.txt" in a
+        // task are names, not addresses.
+        let pattern = #"\b(?:[a-z0-9-]+\.)+([a-z]{2,})(\/[\w\-./?%&=#+]*)?"#
+        if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+            for m in regex.matches(in: text, options: [], range: range) {
+                guard let r = Range(m.range, in: text), let tldRange = Range(m.range(at: 1), in: text) else { continue }
+                let host = String(text[r])
+                if host.lowercased().hasPrefix("www.") || BrowserAgent.webTLDs.contains(text[tldRange].lowercased()) {
+                    return "https://" + host
+                }
+            }
         }
         return nil
     }
+
+    /// Top-level domains a bare host in a task may end in. Deliberately
+    /// leaves out ones that read like file extensions (md, rs, sh, py, pl).
+    nonisolated static let webTLDs: Set<String> = [
+        "com", "org", "net", "io", "ai", "app", "dev", "co", "me", "tv", "info", "edu", "gov", "mil",
+        "biz", "xyz", "news", "blog", "shop", "store", "site", "online", "tech", "cloud", "page", "world",
+        "us", "uk", "ca", "au", "nz", "ie", "de", "fr", "es", "it", "nl", "be", "ch", "at", "se", "no",
+        "dk", "fi", "jp", "kr", "cn", "in", "br", "mx", "ar", "za", "eu", "gg", "so", "to", "ly", "fm", "im"
+    ]
 
     /// The data detector reads a bare host ("go to demoblaze.com") as
     /// http://, which App Transport Security refuses. Use https:// unless
