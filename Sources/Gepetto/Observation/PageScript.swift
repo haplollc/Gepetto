@@ -576,14 +576,31 @@ enum PageScript {
       NS.type = function (target, value, submit) {
         var el = resolve(target);
         if (!el) return { ok: false, error: 'no element for ' + target };
+        if (el.tagName.toLowerCase() === 'select') return NS.select(target, value);
         el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+        // The agent types without a keyboard: inputmode="none" keeps the
+        // on-screen keyboard down while the field has focus (so "type, then
+        // press Enter" still works), and the page's own inputmode comes back
+        // as soon as the field loses focus.
+        if (el.__gepInputMode === undefined) {
+          el.__gepInputMode = el.hasAttribute('inputmode') ? el.getAttribute('inputmode') : null;
+          el.addEventListener('blur', function restore() {
+            el.removeEventListener('blur', restore);
+            if (el.__gepInputMode === null) el.removeAttribute('inputmode');
+            else el.setAttribute('inputmode', el.__gepInputMode);
+            el.__gepInputMode = undefined;
+          });
+        }
+        el.setAttribute('inputmode', 'none');
+        return typeIntoFocused(el, value, submit);
+      };
+
+      function typeIntoFocused(el, value, submit) {
         if (el.focus) el.focus({ preventScroll: true });
         var tag = el.tagName.toLowerCase();
         if (el.getAttribute('contenteditable') === 'true') {
           el.textContent = value;
           el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
-        } else if (tag === 'select') {
-          return NS.select(target, value);
         } else {
           var proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
           var setter = Object.getOwnPropertyDescriptor(proto, 'value');
@@ -619,7 +636,7 @@ enum PageScript {
         }
         var shown = el.value !== undefined ? el.value : el.textContent || '';
         return { ok: true, value: isSecretField(el) ? '' : String(shown).slice(0, 60), label: text(el, 40) };
-      };
+      }
 
       NS.select = function (target, value) {
         var el = resolve(target);

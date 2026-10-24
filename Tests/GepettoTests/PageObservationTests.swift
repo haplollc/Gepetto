@@ -578,6 +578,23 @@ final class PageObservationTests: XCTestCase {
         XCTAssertEqual(title, "sent")
     }
 
+    func testAgentTypingKeepsTheKeyboardDownUntilTheFieldLosesFocus() async throws {
+        try await load("""
+        <html><body><input aria-label="Email" inputmode="email"><input aria-label="Name"></body></html>
+        """)
+        let snap = await engine.observe()
+        let email = try XCTUnwrap(snap.elements.first { $0.text == "Email" })
+        _ = await engine.typeInto(index: email.index, text: "a@b.co", submit: false)
+        let query = "document.querySelector('[aria-label=Email]').getAttribute('inputmode')"
+        let during = (try await engine.evaluateJavaScript(query)) as? String
+        XCTAssertEqual(during, "none", "no on-screen keyboard while the agent types")
+        let focused = (try await engine.evaluateJavaScript("document.activeElement.getAttribute('aria-label')")) as? String
+        XCTAssertEqual(focused, "Email", "the field keeps focus so Enter can follow")
+        _ = try await engine.evaluateJavaScript("document.activeElement.blur(); true")
+        let after = (try await engine.evaluateJavaScript(query)) as? String
+        XCTAssertEqual(after, "email", "the page's own inputmode comes back on blur")
+    }
+
     func testInnerContainerScrollReportsBothEdges() async throws {
         // An app layout: the window cannot scroll, a full-height panel does.
         try await load("""

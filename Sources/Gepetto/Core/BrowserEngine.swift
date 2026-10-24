@@ -309,7 +309,14 @@ public final class BrowserEngine: NSObject, ObservableObject {
         #endif
         // A dialog left open for the person must not block the agent.
         if !enabled, let dialog = pendingDialog { respond(to: dialog.id, ok: false) }
-        if !enabled { releaseKeyboardFocus() }
+        if !enabled {
+            releaseKeyboardFocus()
+        } else {
+            // A field the agent left focused still has its keyboard held down
+            // (inputmode="none" while the agent types). Blurring it gives the
+            // field its own keyboard back the moment the person taps it.
+            webView.evaluateJavaScript("(function(){var a=document.activeElement;if(a&&a!==document.body&&a.blur){a.blur();}return true;})()", completionHandler: nil)
+        }
     }
 
     /// Take keyboard focus away from the page when the agent takes it back,
