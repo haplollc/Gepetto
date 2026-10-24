@@ -34,6 +34,18 @@ public protocol GepettoAIEngine: AnyObject, Sendable {
     ) -> AsyncThrowingStream<String, Error>
 }
 
+// MARK: - Engines with a small context window
+
+/// An engine whose model reads a limited prompt, such as Apple's on-device
+/// model (4,096 tokens for the prompt and the reply together). Before each
+/// step the agent asks whether its prompt fits and, while it does not, shows
+/// the model less: fewer page elements, less page text, fewer earlier steps.
+public protocol GepettoPromptLimitedEngine: GepettoAIEngine {
+    /// True when `prompt`, sent as the only user turn with no system prompt,
+    /// leaves the model room to reply.
+    func promptFits(_ prompt: String) async -> Bool
+}
+
 // MARK: - Message
 
 /// A single conversation turn the agent uses to talk to a `GepettoAIEngine`.

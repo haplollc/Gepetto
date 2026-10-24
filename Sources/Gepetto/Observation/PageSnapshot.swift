@@ -214,8 +214,8 @@ public struct PageSnapshot: Sendable, Equatable {
                 lines.append((isNew && newCount.map { $0 < shown.count } == true ? "*" : "") + e.modelLine)
             }
         }
-        if !text.isEmpty {
-            let t = text.count > maxTextChars ? String(text.prefix(maxTextChars - 1)) + "…" : text
+        if !text.isEmpty, maxTextChars > 0 {
+            let t = text.count > maxTextChars ? String(text.prefix(max(0, maxTextChars - 1))) + "…" : text
             lines.append("VISIBLE TEXT: \(t)")
         }
         return lines.joined(separator: "\n")
