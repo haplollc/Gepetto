@@ -164,10 +164,16 @@ public struct PageSnapshot: Sendable, Equatable {
         lines.append("TITLE: \(title.isEmpty ? "(none)" : title)")
         lines.append("SCROLL: \(scrollDescription)")
         let shown = elements.prefix(maxElements)
+        // Only say "loading" when the document says so. A finished page with
+        // few controls in view (a product description, an article) needs a
+        // scroll, and small models take a loading hint as a reason to wait.
+        let loading = !readyState.isEmpty && readyState != "complete"
         if shown.isEmpty {
-            lines.append("ELEMENTS: none visible. The page may still be loading: wait, or scroll.")
+            lines.append(loading
+                ? "ELEMENTS: none yet, the page is still loading. Wait, then look again."
+                : "ELEMENTS: none in this part of the page. Scroll to find controls, or use done if VISIBLE TEXT already answers the task.")
         } else {
-            if shown.count < 4 { lines.append("(Few elements: the page may still be loading.)") }
+            if loading && shown.count < 4 { lines.append("(The page is still loading; more elements may appear.)") }
             let more = truncated || elements.count > maxElements
             let newCount = previousRefs.map { prev in shown.filter { !prev.contains($0.ref) }.count }
             var header = "ELEMENTS (\(shown.count)"

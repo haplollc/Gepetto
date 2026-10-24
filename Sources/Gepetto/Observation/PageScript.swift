@@ -142,7 +142,13 @@ enum PageScript {
         }
         if (tag === 'textarea' || el.getAttribute('contenteditable') === 'true') return 'textarea';
         if (tag === 'select') return 'select';
-        if (tag === 'a') return 'link';
+        if (tag === 'a') {
+          // href="#" and javascript: links run script in place; to the
+          // model they are buttons, not navigation.
+          var h = (el.getAttribute('href') || '').trim().toLowerCase();
+          if (h === '' || h === '#' || h.indexOf('javascript:') === 0) return 'button';
+          return 'link';
+        }
         if (tag === 'button' || el.getAttribute('role') === 'button' || el.matches('[onclick]')) return 'button';
         var role = el.getAttribute('role');
         if (role) return role;
