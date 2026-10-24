@@ -73,6 +73,10 @@ public final class BrowserEngine: NSObject, ObservableObject {
     
     /// Continuation for navigation completion
     private var navigationContinuation: CheckedContinuation<NavigationResult, Error>?
+
+    /// Why the last main-frame load failed, so `navigate(to:)` can tell an
+    /// App Transport Security refusal from any other failure.
+    private var lastNavigationError: NSError?
     
     /// Observation for loading progress
     private var progressObservation: NSKeyValueObservation?
@@ -94,10 +98,17 @@ public final class BrowserEngine: NSObject, ObservableObject {
         webConfig.mediaTypesRequiringUserActionForPlayback = []
         #endif
         
-        // Enable JavaScript
+        // Page scripts follow the configuration. The engine's own user
+        // script and evaluateJavaScript run either way.
         let prefs = WKWebpagePreferences()
-        prefs.allowsContentJavaScript = true
+        prefs.allowsContentJavaScript = configuration.javaScriptEnabled
         webConfig.defaultWebpagePreferences = prefs
+
+        // Website data: the app's shared persistent store, unless the
+        // configuration asks for a private one that ends with this engine.
+        if configuration.usesEphemeralDataStore {
+            webConfig.websiteDataStore = .nonPersistent()
+        }
         
         // User agent: a custom application name wins; otherwise present as
         // Safari on this device (see BrowserConfiguration.presentsAsSafari).
@@ -120,6 +131,8 @@ public final class BrowserEngine: NSObject, ObservableObject {
         
         // Observe properties
         setupObservations()
+
+        if configuration.blockImages { installImageBlocker() }
     }
     
     deinit {
@@ -130,6 +143,18 @@ public final class BrowserEngine: NSObject, ObservableObject {
         canGoForwardObservation?.invalidate()
     }
     
+    /// Block image loads with a content rule list. Compiling happens in the
+    /// background; the list applies to loads that start after it is added.
+    private func installImageBlocker() {
+        let rules = #"[{"trigger":{"url-filter":".*","resource-type":["image"]},"action":{"type":"block"}}]"#
+        let controller = webView.configuration.userContentController
+        let store: WKContentRuleListStore? = WKContentRuleListStore.default()
+        store?.compileContentRuleList(forIdentifier: "gepetto.block-images", encodedContentRuleList: rules) { list, _ in
+            guard let list else { return }
+            Task { @MainActor in controller.add(list) }
+        }
+    }
+
     private func setupObservations() {
         progressObservation = webView.observe(\.estimatedProgress) { [weak self] webView, _ in
             Task { @MainActor in
@@ -169,19 +194,60 @@ public final class BrowserEngine: NSObject, ObservableObject {
     /// - Returns: Navigation result with page info
     @discardableResult
     public func navigate(to url: String) async throws -> NavigationResult {
-        guard let parsedURL = URL(string: url) ?? URL(string: "https://\(url)") else {
+        // Web pages only: a model or a page must never steer the engine to
+        // a file:, data: or javascript: address.
+        guard let parsedURL = BrowserEngine.webURL(from: url) else {
             throw BrowserError.invalidURL(url)
         }
         return try await navigate(to: parsedURL)
+    }
+
+    /// An http(s) URL for what a person or a model typed. A bare host
+    /// ("example.com", "localhost:8080/x") gets https://; any other scheme
+    /// (file:, data:, javascript:, about:, mailto:) gives nil.
+    nonisolated static func webURL(from text: String) -> URL? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let direct = URL(string: trimmed), let scheme = direct.scheme?.lowercased() {
+            if scheme == "http" || scheme == "https" {
+                guard let host = direct.host, !host.isEmpty else { return nil }
+                return direct
+            }
+            // "localhost:8080" and "example.com:8080/x" parse as a scheme
+            // followed by a port; anything else is a real non-web scheme.
+            guard trimmed.dropFirst(scheme.count + 1).first?.isNumber == true else { return nil }
+        }
+        let candidate = trimmed.hasPrefix("//") ? "https:" + trimmed : "https://" + trimmed
+        guard let url = URL(string: candidate), let host = url.host, !host.isEmpty else { return nil }
+        return url
     }
     
     /// Navigate to a URL.
     @discardableResult
     public func navigate(to url: URL) async throws -> NavigationResult {
+        do {
+            return try await load(url)
+        } catch {
+            // App Transport Security refuses plain http:// pages. Nearly every
+            // site serves the same page over https, so try that once.
+            guard let refusal = lastNavigationError,
+                  refusal.domain == NSURLErrorDomain,
+                  refusal.code == URLError.Code.appTransportSecurityRequiresSecureConnection.rawValue,
+                  url.scheme?.lowercased() == "http",
+                  var secure = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw error }
+            secure.scheme = "https"
+            guard let secureURL = secure.url else { throw error }
+            return try await load(secureURL)
+        }
+    }
+
+    /// One main-frame load, resolved by the navigation delegate.
+    private func load(_ url: URL) async throws -> NavigationResult {
         isExecutingAction = true
         defer { isExecutingAction = false }
         
         lastError = nil
+        lastNavigationError = nil
         isLoading = true
         
         return try await withCheckedThrowingContinuation { continuation in
@@ -243,6 +309,23 @@ public final class BrowserEngine: NSObject, ObservableObject {
         #endif
         // A dialog left open for the person must not block the agent.
         if !enabled, let dialog = pendingDialog { respond(to: dialog.id, ok: false) }
+        if !enabled { releaseKeyboardFocus() }
+    }
+
+    /// Take keyboard focus away from the page when the agent takes it back,
+    /// so nothing the person types (or the iOS keyboard left up) lands in a
+    /// field while the agent drives. Only the web view's own focus is
+    /// touched: on macOS a chat field elsewhere in the window keeps it.
+    private func releaseKeyboardFocus() {
+        webView.evaluateJavaScript("(function(){var a=document.activeElement;if(a&&a!==document.body&&a.blur){a.blur();}return true;})()", completionHandler: nil)
+        #if os(iOS)
+        _ = webView.endEditing(true)
+        #elseif os(macOS)
+        if let window = webView.window, let responder = window.firstResponder as? NSView,
+           responder === webView || responder.isDescendant(of: webView) {
+            _ = window.makeFirstResponder(nil)
+        }
+        #endif
     }
 
     // MARK: - JavaScript dialogs
@@ -274,6 +357,25 @@ public final class BrowserEngine: NSObject, ObservableObject {
     public func stopLoading() {
         webView.stopLoading()
         isLoading = false
+    }
+
+    /// Cancel a load that `navigate(to:)`, `goBack()` or `reload()` is
+    /// waiting on: the waiting call throws at once instead of waiting for
+    /// the page or the timeout. Used when the agent is stopped.
+    func cancelNavigation() {
+        guard let continuation = navigationContinuation else { return }
+        navigationContinuation = nil
+        webView.stopLoading()
+        isLoading = false
+        continuation.resume(throwing: BrowserError.navigationFailed("Stopped"))
+    }
+
+    /// Remove every cookie, storage entry and cached file in this engine's
+    /// website data store, which signs out of everything signed into
+    /// through it.
+    public func clearWebsiteData() async {
+        let store = webView.configuration.websiteDataStore
+        await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
     }
     
     // MARK: - Content Extraction
@@ -401,7 +503,7 @@ public final class BrowserEngine: NSObject, ObservableObject {
     
     /// Extract form fields from the page.
     public func extractFormFields() async throws -> [FormFieldInfo] {
-        // Skip type=hidden inputs entirely — they're never something a user
+        // Skip type=hidden inputs entirely: they're never something a user
         // would want to "fill" in their natural-language instruction. We
         // also enrich the placeholder field with nearby visible label text
         // (an explicit <label for=>, an enclosing <label>, an aria-label,
@@ -556,7 +658,7 @@ public final class BrowserEngine: NSObject, ObservableObject {
             });
             if (exact) { exact.click(); return { success: true, matched: 'exact', tag: exact.tagName }; }
 
-            // 2. Substring match — prefer shortest text (most specific element).
+            // 2. Substring match: prefer shortest text (most specific element).
             var subs = candidates
                 .map(function (el) { return { el: el, text: elText(el).toLowerCase() }; })
                 .filter(function (x) { return x.text.indexOf(needle) !== -1; })
@@ -566,7 +668,7 @@ public final class BrowserEngine: NSObject, ObservableObject {
                 return { success: true, matched: 'substring', tag: subs[0].el.tagName, text: subs[0].text };
             }
 
-            // 3. Last resort — scan all elements but return only LEAF elements
+            // 3. Last resort: scan all elements but return only LEAF elements
             // (no children) so we don't click <body> by accident.
             var leaves = Array.from(document.querySelectorAll('*'))
                 .filter(function (el) {
@@ -950,6 +1052,7 @@ extension BrowserEngine: WKNavigationDelegate {
     
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         isLoading = false
+        lastNavigationError = error as NSError
         lastError = .navigationFailed(error.localizedDescription)
         
         navigationContinuation?.resume(throwing: BrowserError.navigationFailed(error.localizedDescription))
@@ -958,6 +1061,7 @@ extension BrowserEngine: WKNavigationDelegate {
     
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         isLoading = false
+        lastNavigationError = error as NSError
         lastError = .navigationFailed(error.localizedDescription)
         
         navigationContinuation?.resume(throwing: BrowserError.navigationFailed(error.localizedDescription))
@@ -970,8 +1074,10 @@ extension BrowserEngine: WKNavigationDelegate {
 extension BrowserEngine: WKUIDelegate {
     
     public func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        // Handle target="_blank" links by loading in same webview
-        if navigationAction.targetFrame == nil {
+        // Handle target="_blank" links by loading in same webview. Web pages
+        // only: a popup cannot open a file:, data: or javascript: address.
+        if navigationAction.targetFrame == nil,
+           let scheme = navigationAction.request.url?.scheme?.lowercased(), scheme == "http" || scheme == "https" {
             webView.load(navigationAction.request)
         }
         return nil

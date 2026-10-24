@@ -57,17 +57,43 @@ extension BrowserEngine {
 
     // MARK: - Script injection
 
-    /// The user script that installs `window.__gepetto` in every frame.
+    /// The private JavaScript world `PageScript` lives in. Page scripts share
+    /// the DOM with it but not its globals, so they can neither pre-empt nor
+    /// rewrite `window.__gepetto`, and what the agent reads (URL, elements,
+    /// blockers) comes from our code, not the page's.
+    static let contentWorld = WKContentWorld.world(name: "gepetto")
+
+    /// The user script that installs `window.__gepetto` in every frame, in
+    /// `contentWorld`.
     static var pageUserScript: WKUserScript {
-        WKUserScript(source: PageScript.source, injectionTime: .atDocumentEnd, forMainFrameOnly: false)
+        WKUserScript(source: PageScript.source, injectionTime: .atDocumentEnd, forMainFrameOnly: false, in: contentWorld)
+    }
+
+    /// Run `script` in the main frame inside `contentWorld`. JavaScript null
+    /// comes back as nil. (The page-world `evaluateJavaScript(_:)` stays for
+    /// everything that is not page observation.)
+    private func evaluateInContentWorld(_ script: String) async throws -> Any? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Any?, Error>) in
+            webView.evaluateJavaScript(script, in: nil, in: BrowserEngine.contentWorld) { result in
+                switch result {
+                case .success(let value):
+                    continuation.resume(returning: value is NSNull ? nil : value)
+                case .failure(let error):
+                    continuation.resume(throwing: BrowserError.javaScriptError(error.localizedDescription))
+                }
+            }
+        }
     }
 
     /// Make sure the script is present (pages loaded before injection, or
-    /// documents that replaced themselves, may lack it).
+    /// documents that replaced themselves, may lack it). Checked and
+    /// installed in `contentWorld`, where every call looks for it.
     func ensurePageScript() async {
-        let present = (try? await evaluateJavaScript("typeof window.\(PageScript.namespace) === 'object'")) as? Bool ?? false
+        let present = (try? await evaluateInContentWorld("typeof window.\(PageScript.namespace) === 'object'")) as? Bool ?? false
         if !present {
-            _ = try? await evaluateJavaScript(PageScript.source)
+            // The trailing `true` gives the install a value: it never ends
+            // on `undefined`.
+            _ = try? await evaluateInContentWorld(PageScript.source + "\ntrue;")
         }
     }
 
@@ -78,7 +104,10 @@ extension BrowserEngine {
             let s = String(data: data, encoding: .utf8) ?? "[null]"
             return String(s.dropFirst().dropLast()) // strip the wrapping [ ]
         }
-        return try await evaluateJavaScript("window.\(PageScript.namespace).\(function)(\(encoded.joined(separator: ",")))")
+        // Void functions (clearHighlight) would end on `undefined`; hand back
+        // null instead, which reads as nil.
+        let invocation = "window.\(PageScript.namespace).\(function)(\(encoded.joined(separator: ",")))"
+        return try await evaluateInContentWorld("(function () { var r = \(invocation); return r === undefined ? null : r; })()")
     }
 
     // MARK: - Observation
@@ -162,7 +191,7 @@ extension BrowserEngine {
 
     public func setChecked(index: Int, checked: Bool) async -> ElementActionResult {
         isExecutingAction = true; defer { isExecutingAction = false }
-        return actionResult(try? await call("setChecked", [index, checked]), detailKeys: [])
+        return actionResult(try? await call("setChecked", [index, checked]), detailKeys: ["state"])
     }
 
     public func pressKey(_ key: String) async -> ElementActionResult {
@@ -191,7 +220,8 @@ extension BrowserEngine {
     /// CSS pixels → points in the web view: pages that are zoomed out to fit
     /// (desktop layouts on a phone) report a wider `innerWidth` than the view.
     public func cssScale() async -> CGFloat {
-        let inner = (try? await evaluateJavaScript("window.innerWidth")) as? Double ?? 0
+        // In the private world: a page can shadow window.innerWidth in its own.
+        let inner = (try? await evaluateInContentWorld("window.innerWidth")) as? Double ?? 0
         guard inner > 0, webView.bounds.width > 0 else { return 1 }
         return webView.bounds.width / CGFloat(inner)
     }

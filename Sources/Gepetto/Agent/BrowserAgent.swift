@@ -5,12 +5,13 @@
 //  The agent: a real WKWebView driven by a pluggable model
 //  (`GepettoAIEngine`), with the person able to step in at any time.
 //
-//  Two ways of working, picked per task:
-//   - Scripted flow (ScriptedFlow.swift): tasks naming several URLs run as
-//     deterministic navigate → fill → submit stages with AI validation.
-//   - Agent loop (AgentLoop.swift): everything else. Each step the agent
-//     observes the page as a numbered list of elements, asks the model for
-//     one action as JSON, runs it, and checks what changed.
+//  Two ways of working:
+//   - Agent loop (AgentLoop.swift): every task by default. Each step the
+//     agent observes the page as a numbered list of elements, asks the
+//     model for one action as JSON, runs it, and checks what changed.
+//   - Scripted flow (ScriptedFlow.swift): legacy and opt-in
+//     (`useScriptedFlowForMultiURLTasks`). Tasks naming several URLs run
+//     as deterministic navigate → fill → submit stages with AI validation.
 //
 //  Control (AgentControl.swift): pause / resume / stop, take over / hand
 //  back, confirm sensitive actions, answer the agent's questions. The UI in
@@ -29,7 +30,7 @@ import AppKit
 
 /// Coarse-grained activity the agent is performing right now. SwiftUI views
 /// bind to `BrowserAgent.currentPhase` so the user always knows *what* the
-/// agent is doing — thinking, reading, typing, validating, etc.
+/// agent is doing: thinking, reading, typing, validating, etc.
 public enum AgentPhase: Sendable, Equatable {
     case idle
     case starting
@@ -137,7 +138,7 @@ public enum BrowserAgentEvent: Sendable {
     case replaceText(String)
     /// AI decided to call a browser action.
     case action(name: String, arguments: [String: Any])
-    /// Action finished — `summary` is the result we'd feed back to the AI.
+    /// Action finished: `summary` is the result we'd feed back to the AI.
     case actionResult(summary: String, success: Bool)
     /// Per-stage validation outcome (only emitted when validation is on).
     case validation(stageIndex: Int, success: Bool, reason: String)
@@ -221,6 +222,13 @@ public struct BrowserAgentConfiguration: Sendable {
     /// volume, and the result reads more naturally while watching.
     public var naturalPacing: Bool
 
+    /// Run tasks that name two or more URLs as the legacy scripted flow
+    /// (navigate, fill, submit per stage) instead of the agent loop. Off by
+    /// default: the scripted flow asks no approval for sensitive actions,
+    /// hands nothing over for sign-ins or payments, and honours Stop, Pause
+    /// and Take over only between its stages.
+    public var useScriptedFlowForMultiURLTasks: Bool = false
+
     public init(
         maxIterations: Int = 25,
         validateEachStage: Bool = true,
@@ -237,7 +245,8 @@ public struct BrowserAgentConfiguration: Sendable {
         searchURLTemplate: String = "https://html.duckduckgo.com/html/?q=%@",
         accentCSSColor: String = "#111111",
         historyWindow: Int = 8,
-        naturalPacing: Bool = true
+        naturalPacing: Bool = true,
+        useScriptedFlowForMultiURLTasks: Bool = false
     ) {
         self.maxIterations = maxIterations
         self.validateEachStage = validateEachStage
@@ -255,6 +264,7 @@ public struct BrowserAgentConfiguration: Sendable {
         self.accentCSSColor = accentCSSColor
         self.historyWindow = historyWindow
         self.naturalPacing = naturalPacing
+        self.useScriptedFlowForMultiURLTasks = useScriptedFlowForMultiURLTasks
     }
 
     public static let `default` = BrowserAgentConfiguration()
@@ -276,7 +286,7 @@ public final class BrowserAgent: ObservableObject {
     @Published public internal(set) var lastAction: String?
 
     /// Human-readable target of the last action (URL, selector, search query
-    /// text) — populated alongside `lastAction` so SwiftUI views can render
+    /// text), populated alongside `lastAction` so SwiftUI views can render
     /// "what was clicked / where we navigated" without parsing arg dicts.
     @Published public internal(set) var lastActionTarget: String?
 
@@ -330,6 +340,12 @@ public final class BrowserAgent: ObservableObject {
     /// Set by `takeOver()` / `pause()` / `stop()`; consumed at the next step boundary.
     var pendingControl: PendingControl?
     var stopRequested = false
+    /// The model reply being streamed, so `stop()`, `pause()` and
+    /// `takeOver()` can end it at once instead of after its last token.
+    var decisionTask: Task<StreamedReply, Error>?
+    /// True from the moment `run()` starts until it returns, so a second run
+    /// can never interleave with the first on the same web view.
+    var runInProgress = false
 
     enum PendingControl { case pause, takeover }
 
@@ -396,22 +412,30 @@ public final class BrowserAgent: ObservableObject {
 
     // MARK: Control
 
-    /// Pause before the next step. The page stays as it is.
+    /// Pause before the next action. A reply the model is still writing is
+    /// dropped and made again on resume; the page stays as it is.
     public func pause() {
-        guard controlState == .running else { return }
+        guard controlState == .running, pendingControl != .takeover else { return }
         pendingControl = .pause
+        decisionTask?.cancel()
     }
 
-    /// Continue after `pause()`.
+    /// Continue after `pause()`. Also cancels a pause that has not taken
+    /// effect yet.
     public func resume() {
+        if controlState == .running, pendingControl == .pause { pendingControl = nil; return }
         guard controlState == .paused else { return }
         resumeUser(with: .resumed)
     }
 
-    /// Stop the run. The agent reports `failed` with a "stopped" reason.
+    /// Stop the run. The agent reports `failed` with a "stopped" reason. A
+    /// model reply in progress and a page load the run is waiting on are cut
+    /// short, so the run ends within moments.
     public func stop() {
         guard controlState.isActive else { return }
         stopRequested = true
+        decisionTask?.cancel()
+        executor?.engine?.cancelNavigation()
         if userContinuation != nil {
             resumeUser(with: .stopped)
         } else {
@@ -419,12 +443,14 @@ public final class BrowserAgent: ObservableObject {
         }
     }
 
-    /// Give the page to the person. Takes effect at the next step boundary,
-    /// or immediately when the agent is paused or waiting.
+    /// Give the page to the person. Takes effect before the next action (a
+    /// reply the model is still writing is dropped), or immediately when the
+    /// agent is paused or waiting.
     public func takeOver() {
         switch controlState {
         case .running:
             pendingControl = .takeover
+            decisionTask?.cancel()
         case .paused:
             // Swap the wait: the loop resumes and immediately enters takeover.
             pendingControl = .takeover
@@ -471,20 +497,31 @@ public final class BrowserAgent: ObservableObject {
     /// Set by the running loop so control changes reach its event callback.
     var onControlChange: ((AgentControlState) -> Void)?
 
-    /// Park the loop until the person responds.
+    /// Park the loop until the person responds. Overlays are cleared first,
+    /// while the agent still owns the page, and a Stop that arrived in the
+    /// meantime is honoured instead of parking.
     func waitForUser(_ request: UserRequest) async -> UserResponse {
-        setControl(.waitingForUser(request))
         if case .takeover = request {
             await executor?.engine?.hideMarks()
             await executor?.engine?.clearHighlight()
             activeTargetFrame = nil
         }
-        let response = await withCheckedContinuation { (c: CheckedContinuation<UserResponse, Never>) in
-            userContinuation = c
-        }
+        if stopRequested { return .stopped }
+        let response = await park(in: .waitingForUser(request))
         if case .stopped = response { return response }
         if controlState.isActive { setControl(.running) }
         return response
+    }
+
+    /// Store the continuation, then publish `state`, with no suspension in
+    /// between: a Stop or Hand back tapped the moment the card appears, or a
+    /// response sent from the `.control` callback itself, always reaches the
+    /// loop.
+    func park(in state: AgentControlState) async -> UserResponse {
+        await withCheckedContinuation { (c: CheckedContinuation<UserResponse, Never>) in
+            userContinuation = c
+            setControl(state)
+        }
     }
 
     private func resumeUser(with response: UserResponse) {
@@ -563,6 +600,14 @@ public final class BrowserAgent: ObservableObject {
         engine: GepettoAIEngine,
         onEvent: @escaping (BrowserAgentEvent) -> Void
     ) async {
+        // One run at a time: a second loop on the same web view would
+        // interleave actions and orphan the first run's waits.
+        guard !runInProgress, !controlState.isActive else {
+            onEvent(.failed(reason: "A task is already running.", partialText: ""))
+            return
+        }
+        runInProgress = true
+        defer { runInProgress = false }
         currentPhase = .starting
         if executor == nil { start() }
         guard let executor = executor else {
@@ -589,7 +634,7 @@ public final class BrowserAgent: ObservableObject {
             Task { await executor.engine?.hideMarks(); await executor.engine?.clearHighlight() }
         }
 
-        if let script = parseAutomationScript(task) {
+        if configuration.useScriptedFlowForMultiURLTasks, let script = parseAutomationScript(task) {
             await runScriptedFlow(
                 script: script,
                 executor: executor,
@@ -617,8 +662,17 @@ public final class BrowserAgent: ObservableObject {
     func visualPace(extraMs: Int = 0) async {
         var total = configuration.visualPaceMs + extraMs
         if configuration.naturalPacing { total += Int.random(in: 0...600) }
-        guard total > 0 else { return }
-        try? await Task.sleep(nanoseconds: UInt64(total) * 1_000_000)
+        await sleepUnlessStopped(ms: total)
+    }
+
+    /// Sleep in short slices so a Stop lands within a tenth of a second.
+    func sleepUnlessStopped(ms: Int) async {
+        var remaining = ms
+        while remaining > 0, !stopRequested {
+            let slice = min(remaining, 100)
+            try? await Task.sleep(nanoseconds: UInt64(slice) * 1_000_000)
+            remaining -= slice
+        }
     }
 
     // MARK: - Headless host
@@ -727,7 +781,7 @@ extension BrowserAgent {
         let range = NSRange(location: 0, length: nsText.length)
         if let match = detector.firstMatch(in: text, options: [], range: range),
            let url = match.url, let scheme = url.scheme, scheme.hasPrefix("http") {
-            return url.absoluteString
+            return BrowserAgent.preferringHTTPS(url.absoluteString, in: text)
         }
         let pattern = #"\b([a-z0-9-]+\.)+[a-z]{2,}(\/[\w\-./?%&=#+]*)?"#
         if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
@@ -736,5 +790,13 @@ extension BrowserAgent {
             return "https://" + String(text[r])
         }
         return nil
+    }
+
+    /// The data detector reads a bare host ("go to demoblaze.com") as
+    /// http://, which App Transport Security refuses. Use https:// unless
+    /// the text itself spells out the http:// address.
+    nonisolated static func preferringHTTPS(_ url: String, in text: String) -> String {
+        guard url.lowercased().hasPrefix("http://"), !text.lowercased().contains(url.lowercased()) else { return url }
+        return "https://" + url.dropFirst("http://".count)
     }
 }

@@ -96,10 +96,25 @@ public enum SensitiveActionCategory: String, Sendable, CaseIterable {
 
     static let patterns: [SensitiveActionCategory: [String]] = [
         .purchase: ["buy", "purchase", "place order", "place your order", "pay", "checkout", "check out", "confirm order",
-                    "complete order", "subscribe", "add to cart", "book now", "reserve", "donate", "upgrade plan"],
-        .send:     ["send", "post", "publish", "submit", "reply", "tweet", "comment", "share", "message", "apply"],
+                    "complete order", "submit order", "subscribe", "add to cart", "book now", "reserve", "donate", "upgrade plan",
+                    "transfer", "transfer money", "transfer funds", "make a transfer", "send money"],
+        .send:     ["send", "post", "publish", "submit", "reply", "tweet", "comment", "message",
+                    "apply now", "apply for", "submit application", "send application", "share post", "share now"],
         .delete:   ["delete", "remove", "unsubscribe", "cancel subscription", "deactivate", "clear all", "discard", "erase"],
-        .account:  ["change password", "reset password", "update email", "close account", "sign out", "log out", "transfer"]
+        .account:  ["change password", "reset password", "update email", "close account", "sign out", "log out"]
+    ]
+
+    /// The order the lists are checked in, so a label that fits two of them
+    /// ("Send money", "Submit order") always lands in the same, more
+    /// specific category.
+    static let checkOrder: [SensitiveActionCategory] = [.purchase, .account, .delete, .send]
+
+    /// Labels that contain a sensitive word but only change what the page
+    /// shows or copy something: cookie banners, filters, search, links.
+    static let harmlessLabels: Set<String> = [
+        "reject all", "only necessary", "necessary only", "decline",
+        "apply filters", "apply filter", "clear all filters", "clear filters", "remove filter", "remove filters",
+        "reset filters", "submit search", "submit query", "search", "share link", "copy link", "share url", "copy url"
     ]
 
     /// The category a button label falls into, if any. `pageText` lets a
@@ -107,9 +122,13 @@ public enum SensitiveActionCategory: String, Sendable, CaseIterable {
     public static func classify(label: String, pageText: String? = nil) -> SensitiveActionCategory? {
         let l = label.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard !l.isEmpty, l.count < 60 else { return nil }
-        if ["reject all", "only necessary", "necessary only", "decline"].contains(l) { return nil } // cookie banners
-        for (category, words) in patterns {
-            for w in words where l == w || l.hasPrefix(w + " ") || l.hasSuffix(" " + w) || l.contains(" \(w) ") || l == w + "!" {
+        if harmlessLabels.contains(l) { return nil }
+        // "Apply 3 filters", "Clear all filters (2)", "Remove filter: Size M"
+        if l.range(of: #"^(apply|clear|clear all|reset|remove)( \d+)? (filters?|all filters)\b"#, options: .regularExpression) != nil {
+            return nil
+        }
+        for category in checkOrder {
+            for w in patterns[category] ?? [] where l == w || l.hasPrefix(w + " ") || l.hasSuffix(" " + w) || l.contains(" \(w) ") || l == w + "!" {
                 return category
             }
         }
@@ -195,6 +214,8 @@ public struct HandBackSummary: Sendable, Equatable {
     public let urlAfter: String
     public let titleAfter: String
     public let note: String?
+    /// Labels of the fields the person filled ("Email", "Password"), never
+    /// what they typed.
     public let changedFields: [String]
     public let blockersBefore: [PageBlocker]
     public let blockersAfter: [PageBlocker]

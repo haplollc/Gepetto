@@ -3,19 +3,24 @@
 //  Gepetto
 //
 //  The JavaScript side of page observation. Injected once per page as a
-//  WKUserScript (document end, main frame + subframes); the Swift side then
-//  calls `window.__gepetto.snapshot(...)` and friends through
-//  `evaluateJavaScript`.
+//  WKUserScript (document end, main frame + subframes) into a private
+//  content world, `BrowserEngine.contentWorld`; the Swift side then calls
+//  `window.__gepetto.snapshot(...)` and friends in that same world. Page
+//  scripts share the DOM with it but not its globals, so they can neither
+//  pre-empt nor rewrite the namespace.
 //
 //  What it does:
 //   - Walks the DOM (shadow roots and same-origin iframes included), finds
 //     every interactive element, and gives each a stable `data-gep-ref`
 //     attribute. The ref survives across snapshots as long as the element is
 //     attached, so an index the model saw a step ago still means the same
-//     thing after a scroll or a minor re-render.
+//     thing after a scroll or a minor re-render. Refs carry a per-document
+//     token, so they never repeat across navigations.
 //   - Builds the compact element list the model reads:
 //       [12]<button>Sign in</button>
-//     one line per element, nothing a small model has to parse.
+//     one line per element, nothing a small model has to parse. Password,
+//     card and one-time-code values never leave the page: those fields only
+//     report whether they are filled.
 //   - Draws / clears "set-of-marks" badges and a highlight ring on the page
 //     itself, so what the model sees and what the user sees are the same.
 //   - Reports element rectangles (viewport coordinates) so the host can
@@ -23,6 +28,8 @@
 //   - Waits for the page to settle: DOM mutations quiet, no pending
 //     navigation, fonts/images past their first paint.
 //   - Finds and dismisses cookie / consent banners.
+//   - Reports what needs a person (captcha, sign-in, code, payment) while
+//     that UI is on screen.
 //
 
 import Foundation
@@ -40,6 +47,9 @@ enum PageScript {
 
       var NS = {};
       NS.version = 2;
+      // Refs carry a per-document token, so ref "3" on the previous page is
+      // never mistaken for ref "3" here (new-element stars, receipts).
+      var docToken = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       var nextRef = 1;
       var refToElement = new Map();   // ref -> WeakRef(element)
       var lastIndexToRef = [];        // snapshot index -> ref
@@ -47,12 +57,19 @@ enum PageScript {
       var lastMutationAt = performance.now();
 
       // ---- Mutation tracking (for settle detection) ----------------------
+      // Our own writes are not the page changing: the data-gep-ref attributes
+      // a snapshot sets, inserting the overlay, and anything inside it.
+      function onlyOverlay(nodes) {
+        for (var j = 0; j < nodes.length; j++) { if (nodes[j].id !== '__gep_overlay') return false; }
+        return true;
+      }
       try {
         var mo = new MutationObserver(function (list) {
-          // Ignore our own overlay changes.
           for (var i = 0; i < list.length; i++) {
-            var t = list[i].target;
+            var m = list[i], t = m.target;
+            if (m.type === 'attributes' && m.attributeName === 'data-gep-ref') { continue; }
             if (t && t.closest && t.closest('#__gep_overlay')) { continue; }
+            if (m.type === 'childList' && onlyOverlay(m.addedNodes) && onlyOverlay(m.removedNodes)) { continue; }
             mutationCount++;
             lastMutationAt = performance.now();
             return;
@@ -80,27 +97,97 @@ enum PageScript {
         return r.bottom >= -margin && r.top <= vh + margin && r.right >= -margin && r.left <= vw + margin;
       }
 
-      function isCovered(el, rect) {
-        var doc = el.ownerDocument;
-        var cx = Math.min(Math.max(rect.left + rect.width / 2, 0), (doc.defaultView.innerWidth || 1) - 1);
-        var cy = Math.min(Math.max(rect.top + rect.height / 2, 0), (doc.defaultView.innerHeight || 1) - 1);
-        var hit = doc.elementFromPoint(cx, cy);
+      // Flat-tree parent: into the slot a node is assigned to, and out of a
+      // shadow root to its host. Node.contains and closest stop at both.
+      function flatParent(n) { return n.assignedSlot || n.parentNode || n.host || null; }
+      function flatParentElement(n) {
+        var p = flatParent(n);
+        while (p && p.nodeType !== 1) p = flatParent(p);
+        return p;
+      }
+      function flatContains(a, b) {
+        for (var n = b; n; n = flatParent(n)) { if (n === a) return true; }
+        return false;
+      }
+
+      // Document.elementFromPoint answers with the shadow host for a point
+      // inside an open shadow root; descend to the node really there.
+      function deepHit(doc, x, y) {
+        var hit = doc.elementFromPoint(x, y);
+        for (var d = 0; hit && hit.shadowRoot && d < 16; d++) {
+          var sr = hit.shadowRoot;
+          var inner = sr.elementFromPoint ? sr.elementFromPoint(x, y) : null;
+          if (!inner || inner === hit) break;
+          hit = inner;
+        }
+        return hit;
+      }
+
+      // Where a click on `el` lands: the centre of its first fragment on
+      // screen, clipped to the viewport. The bounding-box centre of a wrapped
+      // inline link can sit on the text around it.
+      function probePoint(el) {
+        var win = el.ownerDocument.defaultView;
+        var vw = win.innerWidth || 1, vh = win.innerHeight || 1;
+        var rs = el.getClientRects();
+        if (!rs.length) rs = [el.getBoundingClientRect()];
+        for (var i = 0; i < rs.length; i++) {
+          var r = rs[i];
+          var l = Math.max(r.left, 0), t = Math.max(r.top, 0), rt = Math.min(r.right, vw), b = Math.min(r.bottom, vh);
+          if (rt - l >= 1 && b - t >= 1) return { x: (l + rt) / 2, y: (t + b) / 2 };
+        }
+        return null;
+      }
+
+      // Is one of the control's labels painted where a click on it lands?
+      function labelOnScreen(el) {
+        var labels = el.labels || [];
+        for (var i = 0; i < labels.length; i++) {
+          var lab = labels[i];
+          if (!isVisible(lab)) continue;
+          var p = probePoint(lab);
+          var h = p ? deepHit(lab.ownerDocument, p.x, p.y) : null;
+          if (h && (h === lab || flatContains(lab, h))) return true;
+        }
+        return false;
+      }
+
+      function isCovered(el) {
+        var p = probePoint(el);
+        if (!p) return false;
+        var hit = deepHit(el.ownerDocument, p.x, p.y);
         if (!hit) return false;
-        if (hit === el || el.contains(hit) || hit.contains(el)) return false;
-        // Labels and wrappers of inputs count as the input.
-        if (hit.closest && (hit.closest('label') === el.closest('label')) && el.closest('label')) return false;
+        if (hit === el || flatContains(el, hit)) return false;
+        // Labels of an input count as the input.
+        var lab = hit.closest ? hit.closest('label') : null;
+        if (lab && (lab === el.closest('label') || lab.control === el)) return false;
+        // An ancestor there means the element is not painted at that point
+        // (clipped by overflow, a collapsed menu). Two exceptions: the hit
+        // test looks straight through pointer-events:none, and a visually
+        // hidden input (sr-only, a custom checkbox) is reached through a
+        // label that is itself on screen.
+        if (flatContains(hit, el)) {
+          if (el.ownerDocument.defaultView.getComputedStyle(el).pointerEvents === 'none') return false;
+          return !labelOnScreen(el);
+        }
         return true;
       }
 
       function text(el, max) {
         var t = '';
-        if (el.matches('input, textarea, select')) {
+        var ty = el.matches('input') ? (el.type || 'text').toLowerCase() : '';
+        if (ty === 'submit' || ty === 'button' || ty === 'reset' || ty === 'image') {
+          // Button-like inputs show their value (alt for image buttons); a
+          // submit or reset without one shows the browser's default caption.
+          // This must come before the field branch, which matches any input.
+          t = el.getAttribute('aria-label') || el.value || (ty === 'image' ? el.alt : '') || el.title ||
+              (ty === 'submit' ? 'Submit' : ty === 'reset' ? 'Reset' : '') || labelFor(el) || el.name || '';
+        } else if (el.matches('input, textarea, select')) {
           t = el.getAttribute('aria-label') || el.placeholder || labelFor(el) || el.name || '';
         } else if (el.matches('img')) {
           t = el.alt || el.title || '';
         } else {
           t = el.getAttribute('aria-label') || el.innerText || el.textContent || el.title || '';
-          if (!t && el.matches('input[type=submit], input[type=button]')) t = el.value || '';
         }
         t = (t || '').replace(/\s+/g, ' ').trim();
         if (max && t.length > max) t = t.slice(0, max - 1) + '…';
@@ -108,14 +195,17 @@ enum PageScript {
       }
 
       function labelFor(el) {
+        // Labels live in the element's own tree: a shadow root has its own.
+        var root = el.getRootNode ? el.getRootNode() : el.ownerDocument;
+        if (!root || !root.getElementById) root = el.ownerDocument;
         if (el.id) {
-          var l = el.ownerDocument.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+          var l = root.querySelector('label[for="' + CSS.escape(el.id) + '"]');
           if (l) return (l.textContent || '').trim();
         }
         var p = el.closest('label');
         if (p) return (p.textContent || '').trim();
         var by = el.getAttribute('aria-labelledby');
-        if (by) { var b = el.ownerDocument.getElementById(by); if (b) return (b.textContent || '').trim(); }
+        if (by) { var b = root.getElementById(by); if (b) return (b.textContent || '').trim(); }
         var td = el.closest('td');
         if (td && td.previousElementSibling) return (td.previousElementSibling.textContent || '').trim();
         return '';
@@ -123,14 +213,44 @@ enum PageScript {
 
       var INTERACTIVE = 'a[href], button, input:not([type=hidden]), select, textarea, summary, ' +
         '[role=button], [role=link], [role=checkbox], [role=radio], [role=tab], [role=menuitem], ' +
+        '[role=menuitemcheckbox], [role=menuitemradio], ' +
         '[role=option], [role=switch], [role=textbox], [role=combobox], [role=searchbox], ' +
         '[contenteditable=true], [onclick], [tabindex]:not([tabindex="-1"])';
 
+      // Controls that are listed as one element: a node inside one is part
+      // of it, not a target of its own.
+      var CONTROL = 'a[href], button, summary, select, textarea, input, ' +
+        '[role=button], [role=link], [role=checkbox], [role=radio], [role=switch], [role=tab], ' +
+        '[role=menuitem], [role=menuitemcheckbox], [role=menuitemradio], [role=option]';
+
+      // Is `el` inside a control that the snapshot lists? A control wrapping
+      // other controls is skipped as a wrapper (see snapshot), so the nodes
+      // inside it have to stand in for it.
+      function insideListedControl(el) {
+        for (var a = flatParentElement(el); a; a = flatParentElement(a)) {
+          if (!a.matches(CONTROL)) continue;
+          if (a.matches('a[href], button, input, select, textarea') || !a.querySelector(INTERACTIVE)) return true;
+        }
+        return false;
+      }
+
       function isInteractive(el) {
         if (el.matches(INTERACTIVE)) return true;
-        var cs = el.ownerDocument.defaultView.getComputedStyle(el);
-        return cs.cursor === 'pointer' && el.children.length < 4;
+        // The cursor:pointer heuristic finds div / span click handlers. The
+        // cursor is inherited, so only the node that introduces it counts:
+        // not its children (unless the parent wraps real controls and so is
+        // not listed itself), not nodes inside a listed control, and never a
+        // shape inside an <svg>.
+        if (el.ownerSVGElement) return false;
+        var win = el.ownerDocument.defaultView;
+        if (win.getComputedStyle(el).cursor !== 'pointer') return false;
+        var p = flatParentElement(el);
+        if (p && win.getComputedStyle(p).cursor === 'pointer' && !p.querySelector(INTERACTIVE)) return false;
+        return !insideListedControl(el);
       }
+
+      // ARIA toggles: their state is aria-checked, whatever element carries them.
+      var TOGGLE_KINDS = /^(checkbox|radio|switch|menuitemcheckbox|menuitemradio)$/;
 
       function kind(el) {
         var tag = el.tagName.toLowerCase();
@@ -140,6 +260,9 @@ enum PageScript {
           if (t === 'checkbox' || t === 'radio') return t;
           return 'input';
         }
+        // Before the button rule: <button role="switch"> is a switch.
+        var role = (el.getAttribute('role') || '').toLowerCase();
+        if (TOGGLE_KINDS.test(role)) return role;
         if (tag === 'textarea' || el.getAttribute('contenteditable') === 'true') return 'textarea';
         if (tag === 'select') return 'select';
         if (tag === 'a') {
@@ -149,10 +272,53 @@ enum PageScript {
           if (h === '' || h === '#' || h.indexOf('javascript:') === 0) return 'button';
           return 'link';
         }
-        if (tag === 'button' || el.getAttribute('role') === 'button' || el.matches('[onclick]')) return 'button';
-        var role = el.getAttribute('role');
+        if (tag === 'button' || role === 'button' || el.matches('[onclick]')) return 'button';
         if (role) return role;
         return 'clickable';
+      }
+
+      // Native checkboxes and radios carry .checked; ARIA widgets say it in
+      // aria-checked ("mixed" reads as not checked).
+      function isChecked(el) {
+        if (el.matches('input') && typeof el.checked === 'boolean') return el.checked;
+        return (el.getAttribute('aria-checked') || '').toLowerCase() === 'true';
+      }
+
+      // Fields whose value never leaves the page: passwords, card data,
+      // one-time codes. Deliberately broad: a false positive only hides a
+      // value from the model, a false negative puts a secret in the prompt.
+      function isSecretField(el) {
+        if (el.matches('input') && (el.type || '').toLowerCase() === 'password') return true;
+        var ac = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
+        for (var i = 0; i < ac.length; i++) {
+          if (/^cc-/.test(ac[i]) || /^(one-time-code|new-password|current-password)$/.test(ac[i])) return true;
+        }
+        // passw(or)?d also catches a password field a "show password" toggle
+        // has turned into type=text.
+        return /card|cvv|cvc|ssn|passcode|passw(or)?d|otp|pin\b/i.test((el.getAttribute('name') || '') + ' ' + (el.id || ''));
+      }
+
+      // The button a form submits with on Enter: its first submit button in
+      // tree order (a <button> without a type is one). Shared by the
+      // snapshot's submitLabel and by type / pressKey, so the label the
+      // approval gate sees is the button that really gets pressed.
+      function submitControl(form) {
+        if (!form || !form.elements) return null;
+        for (var i = 0; i < form.elements.length; i++) {
+          var c = form.elements[i];
+          if (c.matches('button, input') && (c.type || '').toLowerCase() === 'submit') return c;
+        }
+        return form.querySelector('input[type=image]');
+      }
+
+      function submitForm(form) {
+        var btn = submitControl(form);
+        if (btn) activate(btn); else if (form.requestSubmit) form.requestSubmit(); else form.submit();
+      }
+
+      // href of a link; on an <svg> <a> the property is an SVGAnimatedString.
+      function hrefOf(el) {
+        return typeof el.href === 'string' ? el.href : (el.getAttribute('href') || el.getAttribute('xlink:href') || '');
       }
 
       function refFor(el) {
@@ -162,7 +328,7 @@ enum PageScript {
           if (w && w.deref && w.deref() === el) return existing;
           if (w && w.el === el) return existing;
         }
-        var ref = String(nextRef++);
+        var ref = docToken + '-' + (nextRef++);
         el.setAttribute('data-gep-ref', ref);
         try { refToElement.set(ref, new WeakRef(el)); } catch (e) { refToElement.set(ref, { el: el, deref: function () { return this.el; } }); }
         return ref;
@@ -239,7 +405,7 @@ enum PageScript {
             if (viewportOnly && !inView) continue;
             // Painted over by something else (a modal, a sticky header)? Then a
             // click would land on that instead; leave it out of the list.
-            if (inView && isCovered(el, rect)) continue;
+            if (inView && isCovered(el)) continue;
             seen.add(el);
             elements.push({ el: el, box: box, inView: inView });
           }
@@ -264,15 +430,28 @@ enum PageScript {
             inView: elements[k].inView
           };
           if (kd === 'input' || kd === 'textarea' || kd === 'select') {
-            entry.value = (e.value || '').slice(0, 60);
+            var raw = typeof e.value === 'string' ? e.value : '';
             entry.inputType = (e.type || '').toLowerCase();
+            entry.filled = raw.length > 0;
+            if (isSecretField(e)) {
+              // Never copied: the model only learns whether it is filled.
+              entry.secret = true;
+              entry.value = '';
+              if (!e.matches('input, textarea, select')) entry.text = e.getAttribute('aria-label') || '';
+            } else {
+              entry.value = raw.slice(0, 60);
+            }
             if (e.placeholder) entry.placeholder = e.placeholder.slice(0, 60);
             if (kd === 'select') {
               entry.options = Array.prototype.slice.call(e.options || [], 0, 12).map(function (o) { return (o.text || '').trim().slice(0, 40); });
+            } else {
+              // What Enter in this field submits with, for the approval gate.
+              var btn = submitControl(e.form || e.closest('form'));
+              if (btn) entry.submitLabel = text(btn, 60);
             }
           }
-          if (kd === 'checkbox' || kd === 'radio') entry.checked = !!e.checked;
-          if (kd === 'link') entry.href = (e.href || '').slice(0, 200);
+          if (TOGGLE_KINDS.test(kd)) entry.checked = isChecked(e);
+          if (kd === 'link') entry.href = hrefOf(e).slice(0, 200);
           out.push(entry);
         }
 
@@ -294,31 +473,49 @@ enum PageScript {
         };
       };
 
+      // Depth-first walk in document order that also enters open shadow
+      // roots and visible same-origin frames where they sit in the page.
+      // `visit` returns false to skip a node's subtree.
+      function walk(node, visit) {
+        var kids = node.childNodes;
+        for (var i = 0; i < kids.length; i++) {
+          var c = kids[i];
+          if (visit(c) === false || c.nodeType !== 1) continue;
+          if (c.shadowRoot) walk(c.shadowRoot, visit);
+          if (c.tagName === 'IFRAME' || c.tagName === 'FRAME') {
+            var d = null;
+            try { d = c.contentDocument; } catch (e) {}
+            if (d && isVisible(c)) walk(d, visit);
+          }
+          walk(c, visit);
+        }
+      }
+
       // Visible text, viewport-first: the text of elements whose boxes touch the
-      // viewport, in reading order; falls back to innerText when that is empty.
+      // viewport, in reading order, with shadow roots and same-origin frames
+      // read where they sit; falls back to innerText when that is empty. A
+      // secret textarea's contents are left out like its value.
+      var TEXT_SKIP = 'script, style, noscript, template, head, #__gep_overlay';
       function visibleText(max, viewportOnly) {
         var out = [];
         var total = 0;
-        var walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT, {
-          acceptNode: function (n) {
-            var p = n.parentElement;
-            if (!p) return NodeFilter.FILTER_REJECT;
-            if (p.closest('script, style, noscript, template, #__gep_overlay')) return NodeFilter.FILTER_REJECT;
-            var t = n.nodeValue.replace(/\s+/g, ' ').trim();
-            if (!t) return NodeFilter.FILTER_REJECT;
-            if (!isVisible(p)) return NodeFilter.FILTER_REJECT;
-            if (viewportOnly) {
-              var r = p.getBoundingClientRect();
-              if (!inViewport(r, 40)) return NodeFilter.FILTER_REJECT;
-            }
-            return NodeFilter.FILTER_ACCEPT;
-          }
-        });
-        var n;
-        while ((n = walker.nextNode()) && total < max) {
+        walk(document.body || document.documentElement, function (n) {
+          if (total >= max) return false;
+          if (n.nodeType === 1) return !n.matches(TEXT_SKIP) && !(n.matches('textarea') && isSecretField(n));
+          if (n.nodeType !== 3) return false;
           var t = n.nodeValue.replace(/\s+/g, ' ').trim();
+          if (!t) return false;
+          var p = n.parentElement || (n.parentNode && n.parentNode.host) || null;
+          if (!p || !isVisible(p)) return false;
+          // Light-DOM text that a shadow tree does not slot is never painted.
+          if (p.shadowRoot && !n.assignedSlot) return false;
+          if (viewportOnly) {
+            var r = p.getBoundingClientRect(), off = frameOffset(p);
+            if (!inViewport({ left: r.left + off.x, top: r.top + off.y, right: r.right + off.x, bottom: r.bottom + off.y }, 40)) return false;
+          }
           out.push(t); total += t.length + 1;
-        }
+          return false;
+        });
         var s = out.join(' ');
         if (!s && document.body) s = (document.body.innerText || '').replace(/\s+/g, ' ').trim();
         return s.length > max ? s.slice(0, max - 1) + '…' : s;
@@ -347,6 +544,14 @@ enum PageScript {
         return true;
       };
 
+      // click() exists on HTMLElement only; an SVG (or MathML) node listed
+      // through role / tabindex / onclick would throw. A synthetic click runs
+      // the same listeners and the nearest ancestor's activation behaviour.
+      function activate(el, opts) {
+        if (typeof el.click === 'function') { el.click(); return; }
+        el.dispatchEvent(new MouseEvent('click', Object.assign({ bubbles: true, cancelable: true, composed: true }, opts || {})));
+      }
+
       NS.click = function (target) {
         var el = resolve(target);
         if (!el) return { ok: false, error: 'no element for ' + target };
@@ -361,7 +566,7 @@ enum PageScript {
           if (el.focus) el.focus({ preventScroll: true });
           el.dispatchEvent(new PointerEvent('pointerup', opts));
           el.dispatchEvent(new MouseEvent('mouseup', opts));
-          el.click();
+          activate(el, opts);
         } catch (e) { return { ok: false, error: String(e) }; }
         return { ok: true, text: text(el, 60), kind: kind(el), urlBefore: before };
       };
@@ -410,12 +615,10 @@ enum PageScript {
           var prevented = !el.dispatchEvent(new KeyboardEvent('keydown', kopts));
           el.dispatchEvent(new KeyboardEvent('keypress', kopts));
           el.dispatchEvent(new KeyboardEvent('keyup', kopts));
-          if (!prevented && el.form) {
-            var btn = el.form.querySelector('input[type=submit], button[type=submit], button:not([type])');
-            if (btn) btn.click(); else if (el.form.requestSubmit) el.form.requestSubmit(); else el.form.submit();
-          }
+          if (!prevented && el.form) submitForm(el.form);
         }
-        return { ok: true, value: (el.value !== undefined ? el.value : el.textContent || '').slice(0, 60), label: text(el, 40) };
+        var shown = el.value !== undefined ? el.value : el.textContent || '';
+        return { ok: true, value: isSecretField(el) ? '' : String(shown).slice(0, 60), label: text(el, 40) };
       };
 
       NS.select = function (target, value) {
@@ -440,43 +643,133 @@ enum PageScript {
       NS.setChecked = function (target, checked) {
         var el = resolve(target);
         if (!el) return { ok: false, error: 'no element' };
-        if (!!el.checked !== !!checked) el.click();
-        return { ok: true, checked: !!el.checked };
+        var want = !!checked;
+        if (isChecked(el) === want) return { ok: true, checked: want, state: 'already ' + (want ? 'checked' : 'unchecked') };
+        try { activate(el); } catch (e) { return { ok: false, error: String(e) }; }
+        // A native input flips at once. An ARIA widget may re-render after
+        // this returns, so its state is not insisted on here.
+        if (el.matches('input') && typeof el.checked === 'boolean' && el.checked !== want) {
+          return { ok: false, checked: el.checked,
+                   error: (el.type === 'radio' && !want) ? 'a radio button cannot be unchecked; pick another option' : 'the page kept it ' + (el.checked ? 'checked' : 'unchecked') };
+        }
+        return { ok: true, checked: isChecked(el), state: 'clicked' };
       };
 
+      // The element that really has focus: document.activeElement stops at
+      // a shadow host or an <iframe>, so descend through open shadow roots
+      // and same-origin frames.
+      function deepActive() {
+        var a = document.activeElement;
+        for (var d = 0; a && d < 32; d++) {
+          var inner = null;
+          try {
+            if (a.shadowRoot && a.shadowRoot.activeElement) inner = a.shadowRoot.activeElement;
+            else if (a.contentDocument && a.contentDocument.activeElement) inner = a.contentDocument.activeElement;
+          } catch (e) {}
+          if (!inner || inner === a) break;
+          a = inner;
+        }
+        return a || document.body;
+      }
+
+      // Visible, focusable elements in tab order: positive tabindex first,
+      // then document order, through shadow roots and frames (frames are
+      // entered, not focused as a whole).
+      var FOCUSABLE = 'a[href], area[href], button, input:not([type=hidden]), select, textarea, summary, ' +
+        '[contenteditable=""], [contenteditable=true], [tabindex]';
+      function focusables() {
+        var out = [];
+        walk(document, function (n) {
+          if (n.nodeType !== 1 || n.id === '__gep_overlay') return false;
+          if (n.matches(FOCUSABLE) && !n.matches('iframe, frame') && !n.disabled && n.tabIndex >= 0 && isVisible(n)) out.push(n);
+          return true;
+        });
+        out.sort(function (a, b) { return (a.tabIndex > 0 ? a.tabIndex : 1e9) - (b.tabIndex > 0 ? b.tabIndex : 1e9); });
+        return out;
+      }
+
       NS.pressKey = function (key) {
-        var el = document.activeElement || document.body;
+        var el = deepActive();
         var map = { Enter: 13, Escape: 27, Tab: 9, Backspace: 8, ArrowDown: 40, ArrowUp: 38, ArrowLeft: 37, ArrowRight: 39, Space: 32 };
         var code = map[key] || 0;
         var opts = { bubbles: true, cancelable: true, key: key === 'Space' ? ' ' : key, code: key, keyCode: code, which: code };
         var prevented = !el.dispatchEvent(new KeyboardEvent('keydown', opts));
+        if (key === 'Tab') {
+          // A synthetic Tab moves nothing by itself: move focus the way the
+          // browser would, then let keyup land on the new element.
+          var next = el;
+          if (!prevented) {
+            var list = focusables();
+            if (list.length) {
+              list[(list.indexOf(el) + 1) % list.length].focus();
+              next = deepActive();
+            }
+          }
+          next.dispatchEvent(new KeyboardEvent('keyup', opts));
+          return { ok: true, target: el.tagName.toLowerCase(), focused: text(next, 40) };
+        }
         el.dispatchEvent(new KeyboardEvent('keypress', opts));
         el.dispatchEvent(new KeyboardEvent('keyup', opts));
-        if (key === 'Enter' && !prevented && el.form) {
-          var btn = el.form.querySelector('input[type=submit], button[type=submit], button:not([type])');
-          if (btn) btn.click(); else if (el.form.requestSubmit) el.form.requestSubmit(); else el.form.submit();
-        }
+        if (key === 'Enter' && !prevented && el.form) submitForm(el.form);
         if (key === 'Escape') { if (el.blur) el.blur(); }
         return { ok: true, target: el.tagName.toLowerCase() };
       };
 
+      // A container that scrolls vertically and is a main panel (at least
+      // 40% of the viewport tall, not a code block); with a direction, only
+      // one that can still move that way.
+      function isScroller(el, dy) {
+        var cs = el.ownerDocument.defaultView.getComputedStyle(el);
+        if (cs.overflowY !== 'auto' && cs.overflowY !== 'scroll') return false;
+        if (el.scrollHeight <= el.clientHeight + 10) return false;
+        if (el.getBoundingClientRect().height <= window.innerHeight * 0.4) return false;
+        if (!dy) return true;
+        return dy > 0 ? el.scrollTop + el.clientHeight < el.scrollHeight - 2 : el.scrollTop > 0;
+      }
+
+      // The container a finger at the viewport centre would scroll.
+      function scrollerAtCentre(dy) {
+        var n = deepHit(document, window.innerWidth / 2, window.innerHeight / 2);
+        for (; n && n !== document.documentElement; n = flatParentElement(n)) {
+          if (isScroller(n, dy)) return n;
+        }
+        return null;
+      }
+
+      function largestScroller(dy) {
+        var best = null, bestArea = 0;
+        var all = document.querySelectorAll('main, [role=main], section, article, div, ul, ol');
+        for (var i = 0; i < all.length; i++) {
+          if (!isScroller(all[i], dy)) continue;
+          var r = all[i].getBoundingClientRect();
+          if (r.width * r.height > bestArea) { best = all[i]; bestArea = r.width * r.height; }
+        }
+        return best;
+      }
+
+      // Scroll the window; when it cannot move, the panel that holds the
+      // content. Both edges are reported either way.
       NS.scrollBy = function (dy) {
+        var se = document.scrollingElement || document.documentElement;
+        var max = se.scrollHeight - window.innerHeight;
         var before = window.scrollY;
         window.scrollBy({ top: dy, left: 0, behavior: 'instant' });
-        // Pages that scroll an inner container instead of the window.
+        var c = null;
         if (window.scrollY === before) {
-          var candidates = document.querySelectorAll('main, [role=main], .scroll, [style*="overflow"], div');
-          for (var i = 0; i < candidates.length; i++) {
-            var c = candidates[i];
-            var cs = getComputedStyle(c);
-            if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') && c.scrollHeight > c.clientHeight + 10 && c.getBoundingClientRect().height > window.innerHeight * 0.4) {
-              c.scrollBy({ top: dy, behavior: 'instant' });
-              return { ok: true, y: c.scrollTop, container: true, atBottom: c.scrollTop + c.clientHeight >= c.scrollHeight - 2 };
-            }
-          }
+          // A window that scrolls but is already at that edge hands over only
+          // to a panel under the viewport centre that can still move, never to
+          // some unrelated div. A window that cannot scroll at all (app layouts
+          // with a fixed body) means a container holds the content: prefer the
+          // one under the centre, then the largest, then one stuck at its edge
+          // so that edge is reported.
+          c = max > 2 ? scrollerAtCentre(dy)
+                      : (scrollerAtCentre(dy) || largestScroller(dy) || scrollerAtCentre(0) || largestScroller(0));
         }
-        var max = Math.max(document.body ? document.body.scrollHeight : 0, document.documentElement.scrollHeight) - window.innerHeight;
-        return { ok: true, y: window.scrollY, container: false, atBottom: window.scrollY >= max - 2, atTop: window.scrollY <= 0 };
+        if (!c) {
+          return { ok: true, y: window.scrollY, container: false, atBottom: window.scrollY >= max - 2, atTop: window.scrollY <= 0 };
+        }
+        c.scrollBy({ top: dy, left: 0, behavior: 'instant' });
+        return { ok: true, y: c.scrollTop, container: true, atTop: c.scrollTop <= 0, atBottom: c.scrollTop + c.clientHeight >= c.scrollHeight - 2 };
       };
 
       // ---- Settle / readiness --------------------------------------------
@@ -487,37 +780,180 @@ enum PageScript {
       };
 
       // ---- Cookie / consent banners -------------------------------------
-      var CONSENT_TEXT = /^(accept( all)?( cookies)?|agree( and continue)?|i agree|allow all|got it|ok(ay)?|continue|close|reject all|only necessary|necessary only|decline|no thanks)$/i;
+      // A button is pressed only inside a consent host: an element whose text
+      // mentions cookies / consent / privacy / GDPR and that is either a
+      // dialog or banner, or a container whose id / class names a cookie or
+      // consent manager. Nothing outside one is ever touched, so a generic
+      // Continue / OK / Close elsewhere is safe. Inside a plain dialog or
+      // banner only cookie-specific choices count (a terms dialog's "I agree"
+      // is not ours to press); the plain words need the manager's own
+      // container. A host holding a sign-in, card or text field, or a price,
+      // is not a consent banner whatever it says. Accept / Agree / Allow all
+      // wins over the other choices.
+      var CONSENT_CHOICE = /^(accept (all|cookies|all cookies)|accept (and|&) close|allow (all|cookies|all cookies)|consent|reject( all)?( cookies)?|only necessary|necessary only|decline( all)?|no thanks|do not consent|continue without accepting|(dis)?agree (and|&) close)$/i;
+      var CONSENT_PLAIN = /^(accept|agree( and continue)?|i agree|i accept|got it|ok(ay)?|continue|close)$/i;
+      // "Privacy Policy" / "Cookie Policy" links sit in every terms dialog;
+      // they alone do not make one a consent banner.
+      var CONSENT_WORDS = /cookie(?!\s+policy)|consent|gdpr|privacy(?!\s+(policy|notice|statement))/i;
+      var NOT_CONSENT = 'input[type=password], input[type=email], input[type=tel], input[type=text], input:not([type]), ' +
+        'input[autocomplete*="cc-" i], textarea';
+      var PRICE = /[$€£¥]\s?\d|\d[.,]\d{2}\s?(usd|eur|gbp)\b/i;
+
+      // id / class / aria-label of a cookie or consent manager. "cmp-" is
+      // left out: Adobe Experience Manager prefixes every component with it.
+      function isConsentManager(n) {
+        var s = (n.id || '') + ' ' + (typeof n.className === 'string' ? n.className : '') + ' ' + (n.getAttribute('aria-label') || '');
+        return /cookie|consent|gdpr|cmp(?!-)/i.test(s);
+      }
+      function isDialogOrBanner(n) {
+        if (n.matches('[role=dialog], [role=alertdialog], [aria-modal=true], [role=banner]')) return true;
+        return /banner/i.test((n.id || '') + ' ' + (typeof n.className === 'string' ? n.className : ''));
+      }
+
+      // 0: not inside a consent host; 1: inside a dialog / banner about
+      // consent; 2: inside a consent manager's own container. The nearest
+      // host that talks about consent decides whether a form disqualifies it.
+      function consentLevel(b, textCache) {
+        var level = 0;
+        for (var n = flatParentElement(b); n; n = flatParentElement(n)) {
+          var doc = n.ownerDocument;
+          if (n === doc.body || n === doc.documentElement) break;
+          var manager = isConsentManager(n);
+          if (!manager && !isDialogOrBanner(n)) continue;
+          var t = textCache.get(n);
+          if (t === undefined) { t = (n.innerText || '').slice(0, 1500); textCache.set(n, t); }
+          if (!CONSENT_WORDS.test(t)) continue;
+          if (n.querySelector(NOT_CONSENT) || PRICE.test(t)) break;
+          if (manager) return 2;
+          level = 1;
+        }
+        return level;
+      }
+
+      function consentRank(t) {
+        if (/not consent|without accepting|disagree/i.test(t)) return 2;
+        if (/accept|agree|allow|consent/i.test(t)) return 0;
+        if (/^(got it|ok(ay)?)$/i.test(t)) return 1;
+        if (/reject|necessary|decline|no thanks/i.test(t)) return 2;
+        if (/^continue$/i.test(t)) return 3;
+        return 4;
+      }
+
       NS.dismissConsent = function () {
         var roots = collectRoots(document);
+        var textCache = new Map();
         var picks = [];
         for (var r = 0; r < roots.length; r++) {
           var buttons = roots[r].querySelectorAll ? roots[r].querySelectorAll('button, a[href], [role=button], input[type=button], input[type=submit]') : [];
           for (var i = 0; i < buttons.length; i++) {
             var b = buttons[i];
             if (!isVisible(b)) continue;
-            var t = text(b, 40);
-            if (!CONSENT_TEXT.test(t)) continue;
-            // Only inside something that looks like a banner / dialog.
-            var host = b.closest('[id*=cookie i], [class*=cookie i], [id*=consent i], [class*=consent i], [aria-label*=cookie i], [role=dialog], [aria-modal=true], [class*=banner i], [id*=gdpr i], [class*=gdpr i]');
-            if (!host) continue;
-            picks.push({ el: b, t: t, accept: /accept|agree|allow|got it|ok/i.test(t) });
+            var t = text(b, 40).replace(/[\s!.]+$/, '');
+            var choice = CONSENT_CHOICE.test(t);
+            if (!choice && !CONSENT_PLAIN.test(t)) continue;
+            var level = consentLevel(b, textCache);
+            if (level === 0 || (!choice && level < 2)) continue;
+            picks.push({ el: b, t: t, rank: consentRank(t) });
           }
         }
         if (!picks.length) return { dismissed: false };
-        picks.sort(function (a, b) { return (b.accept ? 1 : 0) - (a.accept ? 1 : 0); });
-        picks[0].el.click();
+        picks.sort(function (a, b) { return a.rank - b.rank; });
+        try { activate(picks[0].el); } catch (e) { return { dismissed: false, error: String(e) }; }
         return { dismissed: true, clicked: picks[0].t };
       };
 
       // ---- Human-needed detection ----------------------------------------
-      NS.blockers = function () {
+      // A blocker counts only while its UI is on screen: a captcha widget, a
+      // password field (login), a one-time-code field (two_factor), a card
+      // number field or hosted card frame (payment). Structural markers stay
+      // on a page whatever the person does (a reCAPTCHA v3 script or badge,
+      // Stripe's hidden controller frames, a hidden login form, a "Sign in"
+      // link, the word captcha in a script, prose about codes), so they never
+      // count: reporting them would hand the page over on every step.
+      function findAll(roots, sel) {
         var out = [];
-        var html = document.documentElement.outerHTML.slice(0, 200000).toLowerCase();
-        if (/recaptcha|hcaptcha|cf-turnstile|captcha|verify you are human|are you a robot|cf-challenge|challenge-platform/.test(html)) out.push('captcha');
-        if (document.querySelector('input[type=password]') && isVisible(document.querySelector('input[type=password]'))) out.push('login');
-        if (/\b(2fa|two-factor|verification code|one-time code|authenticator app)\b/.test((document.body && document.body.innerText || '').toLowerCase().slice(0, 20000))) out.push('two_factor');
-        if (document.querySelector('input[autocomplete="cc-number"], input[name*="cardnumber" i], iframe[src*="stripe" i], iframe[name*="braintree" i]')) out.push('payment');
+        for (var r = 0; r < roots.length; r++) {
+          var list = roots[r].querySelectorAll ? roots[r].querySelectorAll(sel) : [];
+          for (var i = 0; i < list.length; i++) out.push(list[i]);
+        }
+        return out;
+      }
+
+      // Visible, at least `minH` px tall, and touching the viewport.
+      function onScreen(el, minH) {
+        if (!isVisible(el)) return false;
+        var r = el.getBoundingClientRect(), off = frameOffset(el);
+        if (r.height < minH) return false;
+        return inViewport({ left: r.left + off.x, top: r.top + off.y, right: r.right + off.x, bottom: r.bottom + off.y }, 0);
+      }
+
+      function autocompleteTokens(el) { return (el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/); }
+      function nameAndId(el) { return (el.getAttribute('name') || '') + ' ' + (el.id || ''); }
+
+      // Captcha: a reCAPTCHA checkbox or challenge popup, an hCaptcha or
+      // Turnstile frame, a widget box with something rendered in it, or
+      // Cloudflare's challenge page. The invisible reCAPTCHA badge and
+      // size=invisible frames are markers, not widgets. A solved widget keeps
+      // showing its ticked box, so one whose response field holds a token is
+      // done.
+      var CAPTCHA_SRC = /\/recaptcha\/(api2|enterprise)\/(anchor|bframe)|hcaptcha\.com|challenges\.cloudflare\.com/i;
+      var CAPTCHA_BOX = '.g-recaptcha, .h-captcha, .cf-turnstile, #challenge-stage, #challenge-running, #cf-challenge-running, #turnstile-wrapper';
+      function captchaSolved(el) {
+        var scope = el.closest('.g-recaptcha, .h-captcha, .cf-turnstile, form') || el.ownerDocument;
+        var fields = scope.querySelectorAll('textarea[name="g-recaptcha-response"], textarea[name="h-captcha-response"], input[name="cf-turnstile-response"]');
+        for (var i = 0; i < fields.length; i++) { if (fields[i].value) return true; }
+        return false;
+      }
+      function captchaOnScreen(roots) {
+        var frames = findAll(roots, 'iframe');
+        for (var i = 0; i < frames.length; i++) {
+          var f = frames[i], src = f.getAttribute('src') || '';
+          var box = f.closest(CAPTCHA_BOX);
+          if (!CAPTCHA_SRC.test(src) && !box) continue;
+          if (f.closest('.grecaptcha-badge') || /size=invisible|checkbox-invisible/i.test(src)) continue;
+          if ((box && box.getAttribute('data-size') === 'invisible') || !onScreen(f, 40)) continue;
+          // The challenge popup is on screen only while it is asking.
+          if (/\/bframe/i.test(src) || !captchaSolved(f)) return true;
+        }
+        var boxes = findAll(roots, CAPTCHA_BOX);
+        for (var j = 0; j < boxes.length; j++) {
+          var b = boxes[j];
+          // Invisible reCAPTCHA puts .g-recaptcha on the submit button itself.
+          if (b.matches('button, a, input, [role=button]') || b.getAttribute('data-size') === 'invisible') continue;
+          if (onScreen(b, 40) && !captchaSolved(b)) return true;
+        }
+        return false;
+      }
+
+      // A one-time-code field: autocomplete=one-time-code, or a name / id
+      // that says otp / totp / mfa / 2fa. Prose about codes never counts.
+      function isCodeField(el) {
+        if (autocompleteTokens(el).indexOf('one-time-code') !== -1) return true;
+        return /(^|[^a-z])(otp|totp|otc|mfa|2fa|tfa)/i.test(nameAndId(el));
+      }
+      function isCardNumberField(el) {
+        if (autocompleteTokens(el).indexOf('cc-number') !== -1) return true;
+        return /card.?(number|num|no)|ccnum|cc.?number/i.test(nameAndId(el));
+      }
+      // Hosted card fields (Stripe, Braintree, Adyen, Checkout.com, ...) live in
+      // frames; Stripe's controller and metrics frames are hidden and 0x0.
+      function isCardFrame(f) {
+        var s = (f.getAttribute('name') || '') + ' ' + (f.getAttribute('title') || '') + ' ' + (f.getAttribute('src') || '');
+        return /card|braintree-hosted-field|securedfields|elements-inner-payment|payment input/i.test(s) && !/controller|metrics/i.test(s);
+      }
+
+      NS.blockers = function () {
+        var roots = collectRoots(document);
+        function any(list, minH, test) {
+          for (var i = 0; i < list.length; i++) { if ((!test || test(list[i])) && onScreen(list[i], minH)) return true; }
+          return false;
+        }
+        var inputs = findAll(roots, 'input:not([type=hidden])');
+        var out = [];
+        if (captchaOnScreen(roots)) out.push('captcha');
+        if (any(findAll(roots, 'input[type=password]'), 1)) out.push('login');
+        if (any(inputs, 1, isCodeField)) out.push('two_factor');
+        if (any(inputs, 1, isCardNumberField) || any(findAll(roots, 'iframe'), 16, isCardFrame)) out.push('payment');
         return out;
       };
 

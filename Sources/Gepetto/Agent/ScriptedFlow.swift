@@ -5,8 +5,10 @@
 //  The deterministic multi-stage path: a task that names two or more URLs
 //  ("log in at A, then post at B") is split into stages, each driven as
 //  navigate → form fill → submit, with per-stage AI validation and recovery.
-//  Unchanged from the original agent; the free-form loop in AgentLoop.swift
-//  is where new work goes.
+//  Legacy and opt-in (`BrowserAgentConfiguration.useScriptedFlowForMultiURLTasks`):
+//  it shows no approval cards and hands nothing over, and Stop, Pause and
+//  Take over apply only between stages. Otherwise every task runs through
+//  the free-form loop in AgentLoop.swift, which is where new work goes.
 //
 
 import Foundation
@@ -26,26 +28,32 @@ extension BrowserAgent {
     ) async {
         var lastSnapshot = ""
         for (i, stage) in script.enumerated() {
+            // Stop, Pause and Take over apply between stages.
+            if await scriptedFlowStopped(onEvent: onEvent) { return }
             // Inter-stage cooldown so rate-limited sites don't reject the
             // sequence (HN's 1-action-per-N-seconds policy on submissions
             // is the canonical case). First stage runs immediately.
             if i > 0, configuration.betweenStagesDelayMs > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(configuration.betweenStagesDelayMs) * 1_000_000)
+                await sleepUnlessStopped(ms: configuration.betweenStagesDelayMs)
+                if await scriptedFlowStopped(onEvent: onEvent) { return }
             }
             ensureWebViewHasLayoutContext(executor)
 
-            publishAction(name: "navigate", arguments: ["url": stage.url])
+            // A bare host in the task reads as http://, which App Transport
+            // Security refuses: prefer https://.
+            let stageURL = BrowserAgent.preferringHTTPS(stage.url, in: userTask)
+            publishAction(name: "navigate", arguments: ["url": stageURL])
 
-            onEvent(.action(name: "navigate", arguments: ["url": stage.url]))
+            onEvent(.action(name: "navigate", arguments: ["url": stageURL]))
             isExecuting = true
-            let nav = await executor.execute(json: ["action": "navigate", "url": stage.url])
+            let nav = await executor.execute(json: ["action": "navigate", "url": stageURL])
             let success = nav.success
             isExecuting = false
-            lastSnapshot = await postNavigateSnapshot(executor: executor, navResult: nav, fallbackURL: stage.url)
+            lastSnapshot = await postNavigateSnapshot(executor: executor, navResult: nav, fallbackURL: stageURL)
             onEvent(.actionResult(summary: lastSnapshot, success: success))
 
             if !success {
-                onEvent(.failed(reason: "Navigation to \(stage.url) failed.", partialText: lastSnapshot))
+                onEvent(.failed(reason: "Navigation to \(stageURL) failed.", partialText: lastSnapshot))
                 return
             }
 
@@ -66,6 +74,7 @@ extension BrowserAgent {
             // button, navigate elsewhere) and retry up to maxStageRecoveries
             // times before truly giving up.
             if configuration.validateEachStage {
+                if await scriptedFlowStopped(onEvent: onEvent) { return }
                 currentPhase = .validating
                 var validation = await validateStage(
                     stageIndex: i, stage: stage, snapshot: lastSnapshot,
@@ -75,6 +84,7 @@ extension BrowserAgent {
 
                 var recoveryAttempts = 0
                 while !validation.success, recoveryAttempts < configuration.maxStageRecoveries {
+                    if await scriptedFlowStopped(onEvent: onEvent) { return }
                     recoveryAttempts += 1
                     currentPhase = .recovering(attempt: recoveryAttempts)
                     let recovery = await askForRecovery(
@@ -145,6 +155,7 @@ extension BrowserAgent {
         }
 
         // Final summary turn.
+        if await scriptedFlowStopped(onEvent: onEvent) { return }
         await streamSummary(
             engine: engine,
             history: history,
@@ -152,6 +163,19 @@ extension BrowserAgent {
             finalSnapshot: lastSnapshot,
             onEvent: onEvent
         )
+    }
+
+    /// Honour a pending stop, pause or take over between scripted stages.
+    /// True when the run was stopped (and reported as stopped).
+    private func scriptedFlowStopped(onEvent: @escaping (BrowserAgentEvent) -> Void) async -> Bool {
+        if stopRequested { finish(onEvent: onEvent, failure: "Stopped by the user."); return true }
+        guard let browser = executor?.engine else { return false }
+        var notes: [String] = []
+        if await handlePendingControl(browser: browser, notes: &notes, onEvent: onEvent) == .stopped {
+            finish(onEvent: onEvent, failure: "Stopped by the user.")
+            return true
+        }
+        return false
     }
 
     /// What the AI engine decided to do when a stage validation failed.
@@ -172,7 +196,7 @@ extension BrowserAgent {
     }
 
     /// Ask the AI engine for a single corrective action when a stage failed
-    /// validation. The engine must respond with one line in a strict format —
+    /// validation. The engine must respond with one line in a strict format:
     /// JSON for actionable recoveries, a `GIVE_UP:` prefix when no plausible
     /// fix exists.
     private func askForRecovery(
@@ -215,7 +239,7 @@ extension BrowserAgent {
             Use this when the recovery needs you to go to a different page entirely.
 
         GIVE_UP: <one-sentence reason>
-            Only when there is genuinely no plausible recovery — wrong account, hard 403/404, content blocked, captcha, etc.
+            Only when there is genuinely no plausible recovery: wrong account, hard 403/404, content blocked, captcha, etc.
 
         Pick the SINGLE best option. Output one line.
         """
@@ -258,7 +282,7 @@ extension BrowserAgent {
             return .navigate(url: url, summary: "navigate to \(url)")
         }
 
-        // Couldn't parse — log the raw output so we can iterate the prompt.
+        // Couldn't parse: log the raw output so we can iterate the prompt.
         return .giveUp(reason: "could not parse recovery output: \(raw.prefix(120))")
     }
 
@@ -311,7 +335,7 @@ extension BrowserAgent {
             } else if upper.hasPrefix("NO") {
                 return (false, answer.dropPrefix("NO:").trimmingCharacters(in: .whitespacesAndNewlines))
             } else {
-                // If we can't parse, conservatively pass — better to keep
+                // If we can't parse, conservatively pass: better to keep
                 // going than block on a parser nit.
                 return (true, "unparseable validator output: \(answer.prefix(120))")
             }
@@ -336,7 +360,7 @@ extension BrowserAgent {
 
         ORIGINAL USER TASK: \(userTask)
 
-        Write a short reply (1–2 sentences) describing whether the automation succeeded based on the final page above. Plain text only — no tool_call.
+        Write a short reply (1 or 2 sentences) describing whether the automation succeeded based on the final page above. Plain text only, no tool_call.
         """
 
         var emitted = ""

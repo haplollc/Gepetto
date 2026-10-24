@@ -28,7 +28,7 @@ public struct PageSnapshot: Sendable, Equatable {
         public let index: Int
         public let ref: String
         /// "link", "button", "input", "textarea", "select", "checkbox",
-        /// "radio", "clickable", or an ARIA role.
+        /// "radio", "switch", "clickable", or another ARIA role.
         public let kind: String
         public let tag: String
         public let text: String
@@ -36,22 +36,42 @@ public struct PageSnapshot: Sendable, Equatable {
         public let inputType: String?
         public let placeholder: String?
         public let options: [String]?
+        /// Checkboxes, radios and switches, native or ARIA (`aria-checked`).
         public let checked: Bool?
         public let href: String?
         /// Viewport-relative frame in CSS pixels.
         public let frame: CGRect
         public let inView: Bool
+        /// A password, card or one-time-code field. Its value never leaves
+        /// the page: `value` is empty and `isFilled` says whether it holds
+        /// anything.
+        public var isSecret: Bool = false
+        /// Whether the field holds any text. Set for every field; for a
+        /// secret one it is the only thing known about the value.
+        public var isFilled: Bool = false
+        /// For a field inside a form, the label of the button that form
+        /// submits with, i.e. what pressing Enter in the field presses.
+        /// Not shown to the model.
+        public var submitLabel: String?
 
         public var id: Int { index }
 
         public init(index: Int, ref: String, kind: String, tag: String, text: String,
                     value: String? = nil, inputType: String? = nil, placeholder: String? = nil,
                     options: [String]? = nil, checked: Bool? = nil, href: String? = nil,
-                    frame: CGRect = .zero, inView: Bool = true) {
+                    frame: CGRect = .zero, inView: Bool = true,
+                    isSecret: Bool = false, isFilled: Bool = false, submitLabel: String? = nil) {
+            // A password field is secret whoever built the element, and a
+            // secret's value is dropped here too, not only in the page script.
+            let secret = isSecret || inputType?.lowercased() == "password"
             self.index = index; self.ref = ref; self.kind = kind; self.tag = tag; self.text = text
-            self.value = value; self.inputType = inputType; self.placeholder = placeholder
+            self.value = (secret && value != nil) ? "" : value
+            self.inputType = inputType; self.placeholder = placeholder
             self.options = options; self.checked = checked; self.href = href
             self.frame = frame; self.inView = inView
+            self.isSecret = secret
+            self.isFilled = isFilled || !(value ?? "").isEmpty
+            self.submitLabel = submitLabel
         }
 
         /// The one line the model reads for this element.
@@ -61,11 +81,19 @@ public struct PageSnapshot: Sendable, Equatable {
             case "input", "textarea":
                 if let t = inputType, !t.isEmpty, t != "text" { attrs.append("type=\(t)") }
                 if let p = placeholder, !p.isEmpty { attrs.append("placeholder=\"\(p)\"") }
-                attrs.append("value=\"\(value ?? "")\"")
+                if isSecret {
+                    attrs.append(isFilled ? "value=\"(filled)\"" : "value=\"\"")
+                } else {
+                    attrs.append("value=\"\(value ?? "")\"")
+                }
             case "select":
                 if let o = options, !o.isEmpty { attrs.append("options=\"\(o.joined(separator: "|"))\"") }
-                if let v = value, !v.isEmpty { attrs.append("value=\"\(v)\"") }
-            case "checkbox", "radio":
+                if isSecret {
+                    if isFilled { attrs.append("value=\"(filled)\"") }
+                } else if let v = value, !v.isEmpty {
+                    attrs.append("value=\"\(v)\"")
+                }
+            case "checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio":
                 if checked == true { attrs.append("checked") }
             case "link":
                 if let h = href, let short = Element.shortHref(h) { attrs.append("href=\"\(short)\"") }
@@ -214,7 +242,10 @@ public struct PageSnapshot: Sendable, Equatable {
                 checked: e["checked"] as? Bool,
                 href: e["href"] as? String,
                 frame: CGRect(x: num("x"), y: num("y"), width: num("w"), height: num("h")),
-                inView: e["inView"] as? Bool ?? true
+                inView: e["inView"] as? Bool ?? true,
+                isSecret: e["secret"] as? Bool ?? false,
+                isFilled: e["filled"] as? Bool ?? false,
+                submitLabel: e["submitLabel"] as? String
             )
         }
         let scroll = dict["scroll"] as? [String: Any] ?? [:]

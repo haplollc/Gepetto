@@ -17,11 +17,23 @@ public struct BrowserConfiguration: Sendable {
     /// Timeout for navigation in seconds
     public let navigationTimeout: TimeInterval
     
-    /// Whether to allow JavaScript
+    /// Whether pages may run their own JavaScript. Off disables page
+    /// scripts only: the engine's observation script and
+    /// `evaluateJavaScript` keep working, so the agent can still read and
+    /// drive the page.
     public let javaScriptEnabled: Bool
     
-    /// Whether to block images for faster loading
+    /// Whether to block images for faster loading. Uses a content rule
+    /// list, which compiles in the background right after the engine is
+    /// created, so a page loaded in that first moment may still show images.
     public let blockImages: Bool
+
+    /// Keep cookies, storage and cache in memory for this engine only
+    /// (`WKWebsiteDataStore.nonPersistent()`), so nothing signed into during
+    /// a run outlives the engine. Off by default: the engine shares the
+    /// app's persistent store, and sign-ins made during a takeover carry
+    /// over to later runs (`BrowserEngine.clearWebsiteData()` removes them).
+    public let usesEphemeralDataStore: Bool
 
     /// Identify as Safari on this device rather than as a bare in-app web
     /// view. Sites serve their normal pages to Safari, while many give an
@@ -42,13 +54,15 @@ public struct BrowserConfiguration: Sendable {
         navigationTimeout: TimeInterval = 30,
         javaScriptEnabled: Bool = true,
         blockImages: Bool = false,
-        presentsAsSafari: Bool = true
+        presentsAsSafari: Bool = true,
+        usesEphemeralDataStore: Bool = false
     ) {
         self.userAgent = userAgent
         self.navigationTimeout = navigationTimeout
         self.javaScriptEnabled = javaScriptEnabled
         self.blockImages = blockImages
         self.presentsAsSafari = presentsAsSafari
+        self.usesEphemeralDataStore = usesEphemeralDataStore
     }
 
     /// The application-name suffix Safari uses on this OS version, e.g.

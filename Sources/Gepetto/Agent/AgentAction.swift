@@ -87,7 +87,9 @@ public enum AgentAction: Sendable, Equatable {
         case .navigate(let url):            return "navigate(\(url))"
         case .search(let q):                return "search(\"\(q)\")"
         case .click(let i):                 return "click([\(i)])"
-        case .type(let i, let t, let s):    return "type([\(i)], \"\(t.prefix(40))\"\(s ? ", enter" : ""))"
+        case .type(let i, let t, let s):
+            let shown = t == AgentAction.secretMask ? "<hidden>" : "\"\(t.prefix(40))\""
+            return "type([\(i)], \(shown)\(s ? ", enter" : ""))"
         case .select(let i, let v):         return "select([\(i)], \"\(v)\")"
         case .setChecked(let i, let c):     return "set_checked([\(i)], \(c))"
         case .scroll(let d):                return "scroll(\(d.rawValue))"
@@ -108,7 +110,10 @@ public enum AgentAction: Sendable, Equatable {
         case .navigate(let url):            return "Opening \(AgentAction.prettyHost(url))"
         case .search(let q):                return "Searching for “\(q.prefix(40))”"
         case .click(let i):                 return "Clicking \(target(i))"
-        case .type(let i, let t, _):        return "Typing “\(t.prefix(30))” into \(target(i))"
+        case .type(let i, let t, _):
+            // Never show what goes into a password, card or code field.
+            if t == AgentAction.secretMask || AgentAction.isSecretField(snapshot?.element(at: i)) { return "Typing into \(target(i))" }
+            return "Typing “\(t.prefix(30))” into \(target(i))"
         case .select(let i, let v):         return "Choosing “\(v.prefix(30))” in \(target(i))"
         case .setChecked(let i, let c):     return (c ? "Checking " : "Unchecking ") + target(i)
         case .scroll(let d):                return "Scrolling \(d.rawValue)"
@@ -125,6 +130,25 @@ public enum AgentAction: Sendable, Equatable {
     static func prettyHost(_ url: String) -> String {
         guard let u = URL(string: url), let host = u.host else { return url }
         return host.replacingOccurrences(of: "www.", with: "")
+    }
+
+    /// Shown instead of text typed into a secret field (a password, card
+    /// number or one-time code) in step labels, history, events and logs.
+    public static let secretMask = "••••••"
+
+    /// Whether a field's contents must never be shown or repeated: the page
+    /// marks passwords, card numbers and one-time codes as secret.
+    public static func isSecretField(_ element: PageSnapshot.Element?) -> Bool {
+        guard let element else { return false }
+        return element.isSecret || element.inputType == "password"
+    }
+
+    /// The same action with text bound for a secret field replaced by
+    /// `secretMask`, for step labels, history, events and logs. The agent
+    /// still types the real text.
+    public func redactingSecrets(in snapshot: PageSnapshot?) -> AgentAction {
+        guard case .type(let i, _, let submit) = self, AgentAction.isSecretField(snapshot?.element(at: i)) else { return self }
+        return .type(index: i, text: AgentAction.secretMask, submit: submit)
     }
 }
 
@@ -155,21 +179,33 @@ public enum AgentOutputParser {
         guard let first = trimmed.first, first == "{" || first == "[",
               let data = trimmed.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) else { return raw }
-        func render(_ value: Any) -> String {
-            switch value {
-            case let text as String: return text
-            case let number as NSNumber: return number.stringValue
-            case let list as [Any]: return list.map(render).joined(separator: ", ")
-            case let dict as [String: Any]:
-                return dict.keys.sorted().map { key -> String in
-                    let label = key.replacingOccurrences(of: "_", with: " ")
-                    return "\(label.prefix(1).uppercased())\(label.dropFirst()): \(render(dict[key] ?? ""))"
-                }.joined(separator: "\n")
-            default: return "\(value)"
+        return renderValue(object, listSeparator: ", ", pairSeparator: "\n") ?? raw
+    }
+
+    /// A JSON value as text a person can read: strings as they are, numbers
+    /// and booleans spelled out, list items joined by `listSeparator`,
+    /// objects as "Key: value" pairs joined by `pairSeparator` (anything
+    /// nested stays on one line). Nil for null and for empty values.
+    static func renderValue(_ value: Any, listSeparator: String = "\n", pairSeparator: String = "\n") -> String? {
+        switch value {
+        case let text as String:
+            return text.isEmpty ? nil : text
+        case let number as NSNumber:
+            if CFGetTypeID(number) == CFBooleanGetTypeID() { return number.boolValue ? "true" : "false" }
+            return number.stringValue
+        case let list as [Any]:
+            let items = list.compactMap { renderValue($0, listSeparator: ", ", pairSeparator: ", ") }
+            return items.isEmpty ? nil : items.joined(separator: listSeparator)
+        case let dict as [String: Any]:
+            let pairs = dict.keys.sorted().compactMap { key -> String? in
+                guard let item = dict[key], let text = renderValue(item, listSeparator: ", ", pairSeparator: ", ") else { return nil }
+                let label = key.replacingOccurrences(of: "_", with: " ")
+                return "\(label.prefix(1).uppercased())\(label.dropFirst()): \(text)"
             }
+            return pairs.isEmpty ? nil : pairs.joined(separator: pairSeparator)
+        default:
+            return nil
         }
-        let rendered = render(object)
-        return rendered.isEmpty ? raw : rendered
     }
 
     public enum Failure: Error, Equatable {
@@ -181,25 +217,76 @@ public enum AgentOutputParser {
     /// Parse the model's text into a decision. Accepts, in order:
     ///  1. `{"thought":…, "action":{"name":"click","index":3}}`
     ///  2. `{"action":"click","index":3}` (flat)
-    ///  3. `<tool_call>{"name":"browser","arguments":{"action":"click","index":3}}</tool_call>`
+    ///  3. Function calls: `<tool_call>{"name":"click","arguments":{"index":3}}</tool_call>`
+    ///     and the legacy `{"name":"browser","arguments":{"action":"click","index":3}}`
     ///  4. browser-use style `{"action":[{"click_element":{"index":3}}]}`
-    ///  5. A bare `done: <answer>` / plain final answer when `allowPlainAnswer`.
+    ///  5. Plain prose as a final answer, only when `allowPlainAnswer` (the
+    ///     loop allows it for the second non-JSON reply in a row) and the
+    ///     text does not narrate a next step. An apology or a refusal is a
+    ///     `done` with `success: false`.
     public static func parse(_ text: String, allowPlainAnswer: Bool = true) -> Result<AgentDecision, Failure> {
         let stripped = stripFences(text)
         for candidate in jsonObjects(in: stripped) {
             if let decision = decision(from: candidate) { return .success(decision) }
         }
-        // Not JSON. Treat an unambiguous plain answer as `done`.
-        let plain = stripped.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Not JSON. Prose is a final answer only when the caller allows it
+        // and it reads like an answer rather than a plan.
+        let plain = proseText(stripped)
         if allowPlainAnswer, !plain.isEmpty, !plain.contains("{"), plain.count > 2 {
+            var answer = plain
             let lower = plain.lowercased()
-            if lower.hasPrefix("done:") || lower.hasPrefix("final answer:") || lower.hasPrefix("answer:") {
-                let answer = plain.drop { $0 != ":" }.dropFirst().trimmingCharacters(in: .whitespaces)
-                return .success(AgentDecision(action: .done(answer: String(answer), success: true)))
+            for prefix in ["done:", "final answer:", "answer:"] where lower.hasPrefix(prefix) {
+                answer = String(plain.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                break
             }
-            return .success(AgentDecision(action: .done(answer: plain, success: true)))
+            if !answer.isEmpty, !readsLikeIntention(answer) {
+                return .success(AgentDecision(action: .done(answer: answer, success: !readsLikeRefusal(answer))))
+            }
         }
         return .failure(.noJSON)
+    }
+
+    /// True for a reply with no JSON in it at all. The loop counts these:
+    /// the second in a row may be taken as a final answer.
+    static func isPlainProse(_ text: String) -> Bool {
+        let plain = proseText(stripFences(text))
+        return !plain.isEmpty && !plain.contains("{")
+    }
+
+    /// The reply as prose: trimmed, without a reasoning block that the
+    /// token limit cut off (`<think>` with no `</think>`).
+    static func proseText(_ stripped: String) -> String {
+        var s = stripped
+        if let open = s.range(of: "<think>") { s.removeSubrange(open.lowerBound..<s.endIndex) }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Narration of a next step ("I will click…", "Let me scroll", "Next I
+    /// open…") rather than an answer.
+    static func readsLikeIntention(_ text: String) -> Bool {
+        var lower = text.lowercased().replacingOccurrences(of: "’", with: "'")
+            .trimmingCharacters(in: CharacterSet(charactersIn: " \n\t*#>_-\"'"))
+        // A leading "Okay," / "Sure!" / "First," comes before the real opener.
+        for filler in ["ok", "okay", "sure", "alright", "all right", "great", "got it", "understood", "so", "well", "now", "then", "first", "next"] {
+            for mark in [",", "!", ".", ":"] where lower.hasPrefix(filler + mark) {
+                lower = String(lower.dropFirst(filler.count + 1)).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        let openers = ["i will", "i'll", "let me", "let's", "next i", "i need to", "i should", "i am going to", "i'm going to",
+                       "i want to", "i would like to", "i'd like to", "i must", "i have to", "i can now", "first i", "then i",
+                       "my next step", "the next step", "next step"]
+        if openers.contains(where: { lower.hasPrefix($0) }) { return true }
+        // "**Action:** click index 3", "Action = scroll"
+        return lower.range(of: #"^action\s*[:=]"#, options: .regularExpression) != nil
+    }
+
+    /// An apology or a refusal: still a final reply, but not a success.
+    static func readsLikeRefusal(_ text: String) -> Bool {
+        let opening = String(text.lowercased().replacingOccurrences(of: "’", with: "'").prefix(160))
+        let markers = ["i'm sorry", "i am sorry", "sorry,", "sorry but", "i apologize", "i apologise", "my apologies",
+                       "i can't", "i cannot", "i can not", "i'm unable", "i am unable", "unable to", "i couldn't", "i could not",
+                       "i wasn't able", "i was not able", "i'm not able", "i am not able", "as an ai"]
+        return markers.contains { opening.contains($0) }
     }
 
     /// Pull a partial `"thought": "…"` out of streaming text so the UI can
@@ -239,6 +326,7 @@ public enum AgentOutputParser {
     }
 
     /// Every balanced `{…}` in the text, outermost first, as parsed objects.
+    /// When an outer object does not parse, the objects inside it are tried.
     static func jsonObjects(in text: String) -> [[String: Any]] {
         var results: [[String: Any]] = []
         let chars = Array(text)
@@ -260,8 +348,14 @@ public enum AgentOutputParser {
             }
             if j < chars.count, depth == 0 {
                 let candidate = String(chars[i...j])
-                if let obj = parseLenient(candidate) { results.append(obj) }
-                i = j + 1
+                if let obj = parseLenient(candidate) {
+                    results.append(obj)
+                    i = j + 1
+                } else {
+                    // A stray quote in "thought" can break the outer object;
+                    // keep scanning inside it for the action object.
+                    i += 1
+                }
             } else {
                 i += 1
             }
@@ -284,61 +378,128 @@ public enum AgentOutputParser {
         return nil
     }
 
-    static func decision(from obj: [String: Any]) -> AgentDecision? {
-        let lower = Dictionary(uniqueKeysWithValues: obj.map { ($0.key.lowercased(), $0.value) })
-        var evaluation = lower["evaluation"] as? String ?? lower["evaluation_previous_goal"] as? String
-        if evaluation?.isEmpty == true { evaluation = nil }
-        var memory = lower["memory"] as? String
-        if memory?.isEmpty == true { memory = nil }
-        var thought = lower["thought"] as? String ?? lower["next_goal"] as? String ?? lower["reasoning"] as? String
-        if thought?.isEmpty == true { thought = nil }
+    /// Keys that frame a reply rather than carry an action's arguments.
+    static let envelopeKeys: Set<String> = ["action", "arguments", "parameters", "name", "evaluation",
+                                            "evaluation_previous_goal", "memory", "thought", "next_goal", "reasoning"]
 
-        // Legacy tool_call envelope: {"name":"browser","arguments":{…}}
-        if let args = lower["arguments"] as? [String: Any], (lower["name"] as? String)?.lowercased() == "browser" || lower["name"] == nil {
-            if let a = action(from: args, name: args["action"] as? String) {
-                return AgentDecision(evaluation: evaluation, memory: memory, thought: thought, action: a)
+    /// Action names the bare-key form (`{"click": 3}`) accepts, canonical
+    /// names first, so a stray "answer" beside a real action never wins.
+    static let bareKeyNames: [String] = ["click", "type", "select", "set_checked", "scroll_to", "scroll", "navigate", "search",
+                                         "back", "press", "wait", "extract", "ask_user", "done",
+                                         "click_element", "input_text", "go_to_url", "final_answer", "answer"]
+
+    static func decision(from obj: [String: Any]) -> AgentDecision? {
+        let lower = lowercasedKeys(obj)
+        // Notes may arrive as lists or objects; keep each on one line.
+        func note(_ keys: String...) -> String? {
+            for k in keys {
+                if let v = lower[k], let s = renderValue(v, listSeparator: "; ", pairSeparator: "; ") { return s }
+            }
+            return nil
+        }
+        let evaluation = note("evaluation", "evaluation_previous_goal")
+        let memory = note("memory")
+        let thought = note("thought", "next_goal", "reasoning")
+        func decided(_ a: AgentAction) -> AgentDecision {
+            AgentDecision(evaluation: evaluation, memory: memory, thought: thought, action: a)
+        }
+
+        // Function calls: {"name":"click","arguments":{"index":3}} (also with
+        // "parameters", or the arguments as a JSON string), and the legacy
+        // single tool {"name":"browser","arguments":{"action":"click",…}}.
+        let callArgs = callArguments(lower["arguments"] ?? lower["parameters"])
+        if let args = callArgs {
+            let inner = lowercasedKeys(args)
+            let names = [lower["name"] as? String, inner["action"] as? String, inner["name"] as? String].compactMap { $0 }
+            for name in names {
+                if let a = action(from: args, name: name) { return decided(a) }
             }
         }
 
         if let actionValue = lower["action"] {
-            // {"action": {"name": "click", "index": 3}}
+            // Keys beside the action ("answer", "text", "index") fill in what
+            // the action object left out.
+            let siblings = lower.filter { !envelopeKeys.contains($0.key) }
+            // {"action": {"name": "click", "index": 3}}, also with the
+            // arguments nested: {"action": {"name": "click", "arguments": {…}}}
             if let dict = actionValue as? [String: Any] {
-                let name = (dict["name"] as? String) ?? (dict["action"] as? String) ?? (dict["type"] as? String)
-                if let a = action(from: dict, name: name) {
-                    return AgentDecision(evaluation: evaluation, memory: memory, thought: thought, action: a)
+                var inner = lowercasedKeys(dict)
+                if let args = callArguments(inner["arguments"] ?? inner["parameters"]) {
+                    inner = merging(lowercasedKeys(args), over: inner)
+                }
+                let args = merging(inner, over: siblings)
+                let names = ["name", "action", "type"].compactMap { inner[$0] as? String }
+                for name in names {
+                    if let a = action(from: args, name: name) { return decided(a) }
                 }
                 // browser-use style single-key object: {"click_element": {"index": 3}}
                 if dict.count == 1, let (k, v) = dict.first, let a = action(from: (v as? [String: Any]) ?? [:], name: k) {
-                    return AgentDecision(evaluation: evaluation, memory: memory, thought: thought, action: a)
+                    return decided(a)
                 }
             }
             // {"action": [{"click_element": {"index": 3}}]}
             if let list = actionValue as? [[String: Any]], let first = list.first, let (k, v) = first.first,
                let a = action(from: (v as? [String: Any]) ?? [:], name: k) {
-                return AgentDecision(evaluation: evaluation, memory: memory, thought: thought, action: a)
+                return decided(a)
             }
             // {"action": "click", "index": 3}
-            if let name = actionValue as? String, let a = action(from: lower, name: name) {
-                return AgentDecision(evaluation: evaluation, memory: memory, thought: thought, action: a)
+            if let name = actionValue as? String,
+               let a = action(from: lower, name: name) ?? callArgs.flatMap({ action(from: $0, name: name) }) {
+                return decided(a)
             }
+            // An action was named but could not be read: fail, so the loop
+            // asks again, rather than promote a stray key beside it.
+            return nil
         }
+        // A function call whose arguments did not make an action.
+        if callArgs != nil { return nil }
+
+        // {"name": "click", "index": 3}: an action object on its own, as when
+        // the scan recovers it from a reply whose outer object was broken.
+        for key in ["name", "type"] {
+            if let name = lower[key] as? String, let a = action(from: lower, name: name) { return decided(a) }
+        }
+
         // {"click": 3} / {"navigate": "https://…"} / {"done": "answer"}
-        for (k, v) in lower {
+        for k in bareKeyNames {
+            guard let v = lower[k] else { continue }
             let args: [String: Any]
             if let d = v as? [String: Any] { args = d }
             else if let n = v as? Int { args = ["index": n] }
-            else if let s = v as? String { args = ["url": s, "query": s, "text": s, "answer": s, "question": s, "direction": s, "key": s] }
+            else if let s = renderValue(v) { args = ["index": s, "url": s, "query": s, "text": s, "answer": s, "question": s, "direction": s, "key": s] }
             else { continue }
-            if let a = action(from: args, name: k) {
-                return AgentDecision(evaluation: evaluation, memory: memory, thought: thought, action: a)
-            }
+            if let a = action(from: args, name: k) { return decided(a) }
         }
+        return nil
+    }
+
+    /// Keys folded to lower case without trapping on `"index"` + `"Index"`:
+    /// the spelling that was already lower case wins, otherwise the first in
+    /// sorted order.
+    static func lowercasedKeys(_ dict: [String: Any]) -> [String: Any] {
+        var out: [String: Any] = [:]
+        for key in dict.keys.sorted() {
+            let folded = key.lowercased()
+            if folded == key || out[folded] == nil { out[folded] = dict[key] }
+        }
+        return out
+    }
+
+    /// `primary`, with any key it lacks taken from `fallback`.
+    static func merging(_ primary: [String: Any], over fallback: [String: Any]) -> [String: Any] {
+        primary.merging(fallback) { mine, _ in mine }
+    }
+
+    /// Function-call arguments as an object, also when sent as a JSON string.
+    static func callArguments(_ value: Any?) -> [String: Any]? {
+        if let dict = value as? [String: Any] { return dict }
+        if let text = value as? String { return parseLenient(text) }
         return nil
     }
 
     static func action(from args: [String: Any], name rawName: String?) -> AgentAction? {
         guard let rawName else { return nil }
-        let a = Dictionary(uniqueKeysWithValues: args.map { ($0.key.lowercased(), $0.value) })
+        let a = lowercasedKeys(args)
         func int(_ keys: String...) -> Int? {
             for k in keys {
                 if let n = a[k] as? Int { return n }
@@ -347,8 +508,10 @@ public enum AgentOutputParser {
             }
             return nil
         }
+        // Numbers, lists and objects count as text too: a zip code sent as
+        // 94105, or an answer given as a list.
         func str(_ keys: String...) -> String? {
-            for k in keys { if let s = a[k] as? String, !s.isEmpty { return s } }
+            for k in keys { if let v = a[k], let s = AgentOutputParser.renderValue(v) { return s } }
             return nil
         }
         func bool(_ keys: String...) -> Bool? {

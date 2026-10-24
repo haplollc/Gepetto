@@ -110,4 +110,100 @@ final class AgentOutputParserTests: XCTestCase {
                        "The top story is X, posted by luu.")
         XCTAssertEqual(AgentOutputParser.readableAnswer("{not json"), "{not json")
     }
+
+    func testReadableAnswerDropsNullsAndSpellsOutBooleans() {
+        XCTAssertEqual(AgentOutputParser.readableAnswer(#"{"answer": null, "title": "X"}"#), "Title: X")
+        XCTAssertEqual(AgentOutputParser.readableAnswer(#"{"in_stock": true}"#), "In stock: true")
+    }
+
+    // MARK: Plain prose
+
+    func testNarrationIsNeverAnAnswer() {
+        for text in ["Let me click the Sign in link first.",
+                     "I will click the first story link to read it.",
+                     "Next I need to scroll down.",
+                     "I need to scroll down to find the login link.",
+                     "I should open the menu.",
+                     "Okay, I will search for it.",
+                     "**Action:** click index 3"] {
+            if case .success(let d) = AgentOutputParser.parse(text, allowPlainAnswer: true) {
+                XCTFail("\(text) parsed as \(d.action)")
+            }
+        }
+    }
+
+    func testRefusalIsAnUnsuccessfulAnswer() {
+        let text = "I'm sorry, but I can't help with that."
+        XCTAssertEqual(parse(text)?.action, .done(answer: text, success: false))
+    }
+
+    func testFirstPlainReplyIsNotAnAnswer() {
+        // The loop passes allowPlainAnswer only for the second non-JSON reply in a row.
+        if case .success = AgentOutputParser.parse("The top story is about Rust.", allowPlainAnswer: false) {
+            XCTFail("a first plain reply gets the format reminder; it does not end the task")
+        }
+    }
+
+    func testCutOffThinkBlockIsNotAnAnswer() {
+        if case .success = AgentOutputParser.parse("<think>I should click [3] because", allowPlainAnswer: true) {
+            XCTFail("a reasoning block cut off by the token limit is not an answer")
+        }
+        XCTAssertFalse(AgentOutputParser.isPlainProse("<think>I should click [3] because"))
+        XCTAssertTrue(AgentOutputParser.isPlainProse("The answer is 4."))
+        XCTAssertFalse(AgentOutputParser.isPlainProse(#"{"action":"back"}"#))
+    }
+
+    // MARK: Function calls, nested arguments, odd keys
+
+    func testFunctionCallShapes() {
+        XCTAssertEqual(parse(#"{"name":"click","arguments":{"index":3}}"#)?.action, .click(index: 3))
+        XCTAssertEqual(parse("<tool_call>\n{\"name\": \"click\", \"arguments\": {\"index\": 3}}\n</tool_call>")?.action, .click(index: 3))
+        XCTAssertEqual(parse(#"{"name":"type","arguments":"{\"index\":2,\"text\":\"hi\"}"}"#)?.action, .type(index: 2, text: "hi", submit: false))
+        let nested = parse(#"{"thought":"x","action":{"name":"click","arguments":{"index":3}}}"#)
+        XCTAssertEqual(nested?.action, .click(index: 3))
+        XCTAssertEqual(nested?.thought, "x")
+        XCTAssertEqual(parse(#"{"name":"click","index":3}"#)?.action, .click(index: 3))
+    }
+
+    func testKeysThatDifferOnlyByCaseDoNotCrash() {
+        XCTAssertEqual(parse(#"{"action":"click","index":3,"Index":3}"#)?.action, .click(index: 3))
+        XCTAssertEqual(parse(#"{"thought":"open login","Thought":"open login","action":{"action":"back"}}"#)?.action, .back)
+        // The spelling that is already lower case wins.
+        XCTAssertEqual(parse(#"{"action":{"name":"click","index":3,"INDEX":4}}"#)?.action, .click(index: 3))
+    }
+
+    func testStrayKeyBesideABrokenActionIsNotPromoted() {
+        for text in [#"{"thought":"x","action":{"action":"click","index":"N"},"answer":"not yet"}"#,
+                     #"{"thought":"x","action":{"name":"click_button","index":3},"answer":"not yet"}"#,
+                     #"{"action":{"action":"click","index":"N"},"key":"Enter"}"#] {
+            if case .success(let d) = AgentOutputParser.parse(text, allowPlainAnswer: false) {
+                XCTFail("\(text) parsed as \(d.action)")
+            }
+        }
+        // With no action at all, a bare answer is still a final answer.
+        XCTAssertEqual(parse(#"{"thought":"found it","answer":"42"}"#)?.action, .done(answer: "42", success: true))
+    }
+
+    func testNonStringValuesAreKept() {
+        XCTAssertEqual(parse(#"{"action":"done","answer":["Story A","Story B","Story C"],"success":true}"#)?.action,
+                       .done(answer: "Story A\nStory B\nStory C", success: true))
+        XCTAssertEqual(parse(#"{"action":"done","answer":{"title":"Rust 2.0","points":312}}"#)?.action,
+                       .done(answer: "Points: 312\nTitle: Rust 2.0", success: true))
+        XCTAssertEqual(parse(#"{"action":"done","answer":42}"#)?.action, .done(answer: "42", success: true))
+        XCTAssertEqual(parse(#"{"action":"type","index":3,"text":94105}"#)?.action, .type(index: 3, text: "94105", submit: false))
+        XCTAssertEqual(parse(#"{"memory":["fact1","fact2"],"action":"back"}"#)?.memory, "fact1; fact2")
+        // An answer next to the action object fills it in.
+        XCTAssertEqual(parse(#"{"thought":"x","action":{"name":"done"},"answer":"The top story is X"}"#)?.action,
+                       .done(answer: "The top story is X", success: true))
+    }
+
+    func testLenientScanFindsTheActionInsideABrokenReply() {
+        let text = #"{"evaluation":"the "login" link worked","memory":"on login page","thought":"type the username","action":{"action":"type","index":1,"text":"jc","submit":false}}"#
+        XCTAssertEqual(parse(text)?.action, .type(index: 1, text: "jc", submit: false))
+    }
+
+    func testSetCheckedAndScrollToShapes() {
+        XCTAssertEqual(parse(#"{"action":"set_checked","index":5,"checked":false}"#)?.action, .setChecked(index: 5, checked: false))
+        XCTAssertEqual(parse(#"{"action":"scroll_to","index":3}"#)?.action, .scrollTo(index: 3))
+    }
 }
