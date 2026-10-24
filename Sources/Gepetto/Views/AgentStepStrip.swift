@@ -131,7 +131,7 @@ private struct StepChip: View {
                 .foregroundStyle(isCurrent ? .primary : .secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .frame(maxWidth: 180, alignment: .leading)
+                .frame(maxWidth: 240, alignment: .leading)
         }
         .padding(.horizontal, 8)
         .frame(height: 28)

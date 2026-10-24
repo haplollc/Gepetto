@@ -32,7 +32,7 @@ It ships the whole thing: the engine, the agent loop, the control API, and a pol
 | **Reliability** | Waits for the DOM to go quiet, dismisses cookie banners, auto-closes JavaScript dialogs and reports them, verifies typed values, detects repeated actions and stagnant pages, warns the model when its step budget runs low. |
 | **Small-model help** | One compact prompt per step (no growing transcript), a forgiving JSON parser that repairs the usual mistakes, explicit receipts ("URL changed", "3 new elements", "nothing visible changed"). |
 | **Human in the loop** | Take over / hand back with a summary of what the person changed, approval cards for purchases / sends / deletes, automatic hand-over for captchas, verification codes and payment forms, pause / resume / stop. |
-| **UI** | `AgentBrowserPanel`: the live page with numbered marks and a cursor that glides to each target, the model's thought line, a step timeline, and the control cards. |
+| **UI** | `AgentBrowserPanel`: the live page with a ring on the element being acted on and a cursor that glides to it, the model's thought line, a step timeline, and the control cards. |
 | **Bring your own model** | `GepettoAIEngine` is one streaming function. Works with llama.cpp, MLX, Apple Foundation Models, or any HTTP API. |
 
 ## Installation
@@ -87,7 +87,7 @@ struct ChatScreen: View {
 }
 ```
 
-The panel is the whole experience: the page with numbered marks on everything the model can see, a cursor that moves to each target, the site's favicon, the thought line, the timeline, and buttons for **Pause**, **Take over** and **Stop**. When the agent needs the person, a card appears on the page itself. Chrome is Liquid Glass on iOS 26 / macOS 26 and a material before that; the look is monochrome, with symbols that draw themselves on.
+The panel is the whole experience: the live page with a ring on the element the agent is about to act on and a cursor that moves to it (numbered marks for every element are available with `config.showMarks`), the site's favicon, the thought line, the timeline, and buttons for **Pause**, **Take over** and **Stop**. When the agent needs the person, a card appears on the page itself. Chrome is Liquid Glass on iOS 26 / macOS 26 and a material before that; the look is monochrome, with symbols that draw themselves on.
 
 ## Letting people take over
 
@@ -176,7 +176,7 @@ var config = BrowserAgentConfiguration()
 config.maxIterations = 25               // step budget for one task
 config.observation.viewportOnly = true  // the model sees what a person sees
 config.observation.maxElements = 60
-config.showMarks = true                 // numbered badges on the live page
+config.showMarks = false                // numbered badges on the live page (off: the page stays readable)
 config.highlightTargets = true          // ring + cursor on the element being acted on
 config.autoDismissConsent = true
 config.handOverBlockers = [.captcha, .twoFactor, .payment]

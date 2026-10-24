@@ -46,6 +46,7 @@ public struct AgentBrowserPanel: View {
             if showsTimeline { footer }
         }
         .agentGlass(in: RoundedRectangle(cornerRadius: AgentUI.radiusLarge, style: .continuous))
+        .agentPanelShadow()
         .onChange(of: agent.controlState) { state in
             guard case .finished(let ok) = state else { return }
             withAnimation(.easeInOut(duration: 0.2)) { toast = (ok, ok ? "Finished" : agent.currentPhase.label) }
@@ -73,8 +74,12 @@ public struct AgentBrowserPanel: View {
                         .lineLimit(1)
                 }
             }
+            .layoutPriority(0)
             Spacer(minLength: 8)
+            // The controls never wrap or truncate; the title gives way.
             HStack(spacing: AgentUI.spacing) { controls }
+                .fixedSize()
+                .layoutPriority(1)
                 .agentGlassContainer()
         }
         .padding(.horizontal, AgentUI.padding)
@@ -144,8 +149,8 @@ public struct AgentBrowserPanel: View {
         }
         .frame(height: stageHeight)
         .frame(maxWidth: .infinity, maxHeight: stageHeight == nil ? .infinity : nil)
-        .clipShape(RoundedRectangle(cornerRadius: AgentUI.radius, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: AgentUI.radius, style: .continuous).strokeBorder(AgentUI.hairline, lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: AgentUI.radiusStage, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: AgentUI.radiusStage, style: .continuous).strokeBorder(AgentUI.hairline, lineWidth: 0.5))
         .padding(.horizontal, 10)
         .padding(.bottom, showsTimeline ? 10 : 10)
         .padding(.top, showsHeader ? 0 : 10)

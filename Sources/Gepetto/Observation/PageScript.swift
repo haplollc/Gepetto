@@ -536,16 +536,14 @@ enum PageScript {
           if (!el) continue;
           var r = el.getBoundingClientRect(); var off = frameOffset(el);
           if (r.width < 1 || r.height < 1) continue;
-          var box = document.createElement('div');
-          box.style.cssText = 'position:absolute;left:' + (r.left + off.x) + 'px;top:' + (r.top + off.y) + 'px;width:' + r.width + 'px;height:' + r.height + 'px;' +
-            'border:1px solid ' + accent + ';border-radius:5px;box-sizing:border-box;opacity:.7;box-shadow:0 0 0 1px rgba(255,255,255,.7);';
+          // A small translucent badge in the element's corner; no box around
+          // the element, so the page stays readable.
           var tag = document.createElement('div');
           tag.textContent = String(i);
-          tag.style.cssText = 'position:absolute;left:-1px;top:-6px;transform:translateY(-100%);background:' + accent + ';color:#fff;font-size:10px;font-weight:600;' +
-            'line-height:15px;padding:0 4px;border-radius:4px;box-shadow:0 0 0 1px rgba(255,255,255,.85),0 1px 2px rgba(0,0,0,.3);white-space:nowrap;font-variant-numeric:tabular-nums;';
-          if (r.top + off.y < 20) { tag.style.top = '2px'; tag.style.transform = 'none'; }
-          box.appendChild(tag);
-          o.appendChild(box);
+          tag.style.cssText = 'position:absolute;left:' + (r.left + off.x - 2) + 'px;top:' + (r.top + off.y - 2) + 'px;' +
+            'background:' + accent + ';color:#fff;opacity:.82;font-size:9px;font-weight:600;line-height:14px;padding:0 4px;border-radius:7px;' +
+            'box-shadow:0 0 0 1px rgba(255,255,255,.9);white-space:nowrap;font-variant-numeric:tabular-nums;';
+          o.appendChild(tag);
         }
         return lastIndexToRef.length;
       };
@@ -558,20 +556,17 @@ enum PageScript {
         if (!el) return false;
         var o = overlay();
         var r = el.getBoundingClientRect(); var off = frameOffset(el);
+        // One thin ring that settles onto the element. The label is spoken
+        // by the panel's thought line, not painted on the page.
         var ring = document.createElement('div');
         ring.className = '__gep_ring';
         ring.style.cssText = 'position:absolute;left:' + (r.left + off.x - 4) + 'px;top:' + (r.top + off.y - 4) + 'px;width:' + (r.width + 8) + 'px;height:' + (r.height + 8) + 'px;' +
-          'border:2px solid ' + accent + ';border-radius:8px;box-sizing:border-box;box-shadow:0 0 0 1px rgba(255,255,255,.85), 0 4px 14px rgba(0,0,0,.25);' +
-          'transition:opacity .4s ease;';
-        if (label) {
-          var tag = document.createElement('div');
-          tag.textContent = label;
-          tag.style.cssText = 'position:absolute;left:0;top:-8px;transform:translateY(-100%);background:' + accent + ';color:#fff;font-size:12px;font-weight:600;' +
-            'line-height:20px;padding:0 8px;border-radius:6px;box-shadow:0 0 0 1px rgba(255,255,255,.85),0 2px 6px rgba(0,0,0,.25);white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis;';
-          ring.appendChild(tag);
-        }
+          'border:2px solid ' + accent + ';border-radius:8px;box-sizing:border-box;' +
+          'box-shadow:0 0 0 1px rgba(255,255,255,.9), 0 0 0 6px rgba(0,0,0,.08);' +
+          'opacity:0;transform:scale(1.06);transition:opacity .22s ease, transform .3s cubic-bezier(.2,.8,.2,1);';
         var olds = o.querySelectorAll('.__gep_ring'); for (var i = 0; i < olds.length; i++) olds[i].remove();
         o.appendChild(ring);
+        requestAnimationFrame(function () { ring.style.opacity = '1'; ring.style.transform = 'none'; });
         return true;
       };
 

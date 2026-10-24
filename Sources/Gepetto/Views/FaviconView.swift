@@ -43,7 +43,9 @@ final class FaviconStore: ObservableObject {
             let declared = (try? await engine.evaluateJavaScript(js)) as? String ?? ""
             var candidates: [URL] = []
             if let u = URL(string: declared), !declared.isEmpty { candidates.append(u) }
-            if let origin = URL(string: "\(url.scheme ?? "https")://\(host)/favicon.ico") { candidates.append(origin) }
+            let origin = "\(url.scheme ?? "https")://\(host)"
+            if let u = URL(string: origin + "/favicon.ico") { candidates.append(u) }
+            if let u = URL(string: origin + "/apple-touch-icon.png") { candidates.append(u) }
             for candidate in candidates {
                 if let image = await Self.fetch(candidate) {
                     icons[host] = image
@@ -52,6 +54,12 @@ final class FaviconStore: ObservableObject {
             }
             failed.insert(host)
         }
+    }
+
+    /// Forget an earlier failure for the engine's host and look again.
+    func retry(for engine: BrowserEngine) {
+        if let host = engine.currentURL?.host { failed.remove(host) }
+        load(for: engine)
     }
 
     private static func fetch(_ url: URL) async -> GepettoImage? {
@@ -88,7 +96,9 @@ struct FaviconView: View {
         }
         .onAppear { store.load(for: engine) }
         .onChange(of: engine.currentURL) { _ in store.load(for: engine) }
-        .onChange(of: engine.isLoading) { loading in if !loading { store.load(for: engine) } }
+        // A fetch that ran before the document finished (no <link> yet) gets
+        // one more try once the page has loaded.
+        .onChange(of: engine.isLoading) { loading in if !loading { store.retry(for: engine) } }
     }
 
     private func platformImage(_ image: GepettoImage) -> Image {

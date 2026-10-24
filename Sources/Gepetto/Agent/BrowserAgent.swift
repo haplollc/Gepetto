@@ -189,6 +189,8 @@ public struct BrowserAgentConfiguration: Sendable {
     public var observation: ObservationOptions
 
     /// Draw numbered badges on the page for every element the model can see.
+    /// Off by default: the model reads a text list, so the badges are only
+    /// for people who want to see what it sees, and they clutter the page.
     public var showMarks: Bool
 
     /// Ring the element the agent is about to act on.
@@ -227,7 +229,7 @@ public struct BrowserAgentConfiguration: Sendable {
         maxStageRecoveries: Int = 2,
         betweenStagesDelayMs: Int = 2000,
         observation: ObservationOptions = .default,
-        showMarks: Bool = true,
+        showMarks: Bool = false,
         highlightTargets: Bool = true,
         autoDismissConsent: Bool = true,
         handOverBlockers: Set<PageBlocker> = [.captcha, .twoFactor, .payment],

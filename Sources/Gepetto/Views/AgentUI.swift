@@ -17,6 +17,9 @@ enum AgentUI {
     static let radius: CGFloat = 16
     /// Inset chips.
     static let radiusSmall: CGFloat = 8
+    /// The page region inside the panel: concentric with the panel's corner
+    /// (panel radius minus the 10pt inset).
+    static let radiusStage: CGFloat = 14
 
     static let hairline = Color.primary.opacity(0.08)
     static let inset = Color.primary.opacity(0.05)
@@ -49,6 +52,12 @@ extension View {
         }
     }
 
+    /// The soft drop shadow under a floating panel. Lighter in dark mode,
+    /// where the surface behind is already dark.
+    func agentPanelShadow() -> some View {
+        modifier(AgentPanelShadow())
+    }
+
     /// A group of glass controls that should merge and morph together.
     @ViewBuilder
     func agentGlassContainer(spacing: CGFloat = 8) -> some View {
@@ -67,6 +76,15 @@ extension AgentUI {
         if let tint { glass = glass.tint(tint) }
         if interactive { glass = glass.interactive() }
         return glass
+    }
+}
+
+struct AgentPanelShadow: ViewModifier {
+    @Environment(\.colorScheme) private var scheme
+    func body(content: Content) -> some View {
+        content
+            .shadow(color: .black.opacity(scheme == .dark ? 0.35 : 0.14), radius: 28, x: 0, y: 14)
+            .shadow(color: .black.opacity(scheme == .dark ? 0.25 : 0.05), radius: 2, x: 0, y: 1)
     }
 }
 
@@ -124,6 +142,8 @@ struct GlassPillButton: View {
         Button(action: action) {
             let label = Label(title, systemImage: symbol)
                 .font(AgentUI.bodySemibold)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 14)
                 .frame(height: 36)
                 .contentShape(Capsule())
