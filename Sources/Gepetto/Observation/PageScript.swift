@@ -954,9 +954,15 @@ enum PageScript {
       }
       // Hosted card fields (Stripe, Braintree, Adyen, Checkout.com, ...) live in
       // frames; Stripe's controller and metrics frames are hidden and 0x0.
+      // A bare "card" anywhere is not enough: stores frame ads and credit
+      // card offers next to products. A card field frame either has a known
+      // provider name, or the accessible title such frames carry ("Secure
+      // card number input frame").
       function isCardFrame(f) {
-        var s = (f.getAttribute('name') || '') + ' ' + (f.getAttribute('title') || '') + ' ' + (f.getAttribute('src') || '');
-        return /card|braintree-hosted-field|securedfields|elements-inner-payment|payment input/i.test(s) && !/controller|metrics/i.test(s);
+        var name = f.getAttribute('name') || '', title = f.getAttribute('title') || '', src = f.getAttribute('src') || '';
+        if (/controller|metrics/i.test(name + ' ' + title + ' ' + src)) return false;
+        if (/braintree-hosted-field|securedfields|checkout-frames|sq-card|single-card-element|elements-inner-(card|payment)/i.test(name + ' ' + src)) return true;
+        return /(card|credit|debit)\W{0,3}(number|payment|details|input|field|cvc|cvv|expir)|payment input/i.test(title);
       }
 
       NS.blockers = function () {

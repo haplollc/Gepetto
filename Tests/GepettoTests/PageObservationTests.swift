@@ -323,6 +323,26 @@ final class PageObservationTests: XCTestCase {
         XCTAssertEqual(visible, [.login])
     }
 
+    func testStoreFramesThatMentionCardsAreNotPaymentForms() async throws {
+        // A product page: an ad frame and a credit card offer, both on screen.
+        try await load("""
+        <html><body>
+        <iframe name="ad-creditcard-offer" src="about:blank#creditcard-banner" style="width:300px;height:120px;border:0"></iframe>
+        <iframe title="Amazon Visa card offer" style="width:300px;height:80px;border:0"></iframe>
+        </body></html>
+        """)
+        let offers = await engine.blockers()
+        XCTAssertEqual(offers, [])
+
+        // A hosted card field, as Stripe names it for screen readers.
+        _ = try await engine.evaluateJavaScript("""
+        var f = document.createElement('iframe'); f.title = 'Secure card number input frame';
+        f.style.cssText = 'width:300px;height:40px;border:0'; document.body.appendChild(f); true
+        """)
+        let field = await engine.blockers()
+        XCTAssertEqual(field, [.payment])
+    }
+
     func testSolvedCaptchaNoLongerBlocks() async throws {
         try await load("""
         <html><body><form>
