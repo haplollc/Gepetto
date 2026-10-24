@@ -84,4 +84,14 @@ final class AgentControlTests: XCTestCase {
         agent.pause(); agent.resume(); agent.takeOver(); agent.handBack(); agent.respond(allow: true); agent.answer("x")
         XCTAssertEqual(agent.controlState, .idle)
     }
+
+    func testTaskAsksForPageAction() {
+        XCTAssertTrue(AgentLoopHeuristics.taskAsksForPageAction("Open demoblaze.com and add this phone to the cart."))
+        XCTAssertTrue(AgentLoopHeuristics.taskAsksForPageAction("Sign up for the newsletter on example.com"))
+        XCTAssertTrue(AgentLoopHeuristics.taskAsksForPageAction("Tap the Add to cart button."))
+        XCTAssertFalse(AgentLoopHeuristics.taskAsksForPageAction("Go to news.ycombinator.com and tell me the title of the top story."))
+        XCTAssertFalse(AgentLoopHeuristics.taskAsksForPageAction("What is the weather in Paris today?"))
+        // Whole words only: "address" is not "add", "registered" is not "register".
+        XCTAssertFalse(AgentLoopHeuristics.taskAsksForPageAction("Find the address of the registered office."))
+    }
 }

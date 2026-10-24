@@ -47,6 +47,7 @@ extension BrowserAgent {
         var emittedThought = ""
         var previousRefs: Set<String>? = nil
         var warnedBudget = false
+        var challengedDone = false
 
         // A task that names a URL starts there: the first decision is then
         // based on a real page instead of a blank one.
@@ -189,6 +190,16 @@ extension BrowserAgent {
 
             switch decision.action {
             case .done(let answerText, let success):
+                // Small models claim "added it to the cart" without touching
+                // the page. A task that asks for an action is not done until
+                // something was clicked, typed or chosen; challenge once.
+                if success, !challengedDone, AgentLoopHeuristics.taskAsksForPageAction(task),
+                   !steps.contains(where: { $0.succeeded && $0.action.changesThePage }) {
+                    challengedDone = true
+                    await endStep(step, outcome: "not done: nothing on the page was clicked or typed yet", browser: browser, onEvent: onEvent)
+                    notes.append("You have not clicked or typed anything on the page yet, so the task is not done. Find the control for it in ELEMENTS (scroll if needed) and use it; only then use done.")
+                    continue
+                }
                 let step = step
                 await endStep(step, outcome: success ? "task complete" : "stopped", browser: browser, onEvent: onEvent)
                 let text = answerText.isEmpty ? (success ? "Done." : "I could not finish this task.") : AgentOutputParser.readableAnswer(answerText)
@@ -592,3 +603,30 @@ extension BrowserAgent {
         onEvent(.failed(reason: failure, partialText: partial))
     }
 }
+
+/// Plain-text checks on the task the person typed.
+enum AgentLoopHeuristics {
+    /// Verbs that mean "do something on the page", not "find something out".
+    static let actionVerbs = ["add", "buy", "order", "book", "reserve", "purchase", "checkout", "check out",
+                              "submit", "send", "post", "publish", "sign up", "subscribe", "register",
+                              "delete", "remove", "fill", "apply", "click", "tap", "press", "select",
+                              "choose", "enter", "type", "log in", "sign in", "upload", "rsvp", "vote", "like"]
+
+    /// True when the task asks the agent to act on a page rather than read it.
+    static func taskAsksForPageAction(_ task: String) -> Bool {
+        let words = " " + task.lowercased().replacingOccurrences(of: #"[^a-z ]"#, with: " ", options: .regularExpression) + " "
+        return actionVerbs.contains { words.contains(" \($0) ") }
+    }
+}
+
+extension AgentAction {
+    /// Actions that change something on the page (as opposed to reading,
+    /// scrolling, waiting or moving between pages).
+    var changesThePage: Bool {
+        switch self {
+        case .click, .type, .select, .setChecked, .press: return true
+        default: return false
+        }
+    }
+}
+
