@@ -602,6 +602,12 @@ extension BrowserAgent {
             return "typed into \(snapshot?.element(at: index)?.humanLabel ?? "[\(index)]")\(submit ? " and pressed Enter" : "").\(navigatedNote())"
 
         case .select(let index, let value):
+            // Small models "select" a radio button or checkbox by its label;
+            // that means check it, not fail.
+            if let kind = snapshot?.element(at: index)?.kind, kind == "radio" || kind == "checkbox" {
+                let r = await browser.setChecked(index: index, checked: true)
+                return r.ok ? "checked \(snapshot?.element(at: index)?.humanLabel ?? "[\(index)]")" : "failed: \(r.error ?? "")"
+            }
             let r = await browser.selectOption(index: index, value: value)
             return r.ok ? "selected \(r.detail)" : "failed: \(r.error ?? "select failed")"
 
