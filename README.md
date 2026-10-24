@@ -84,6 +84,21 @@ final class MyModel: GepettoAIEngine {
 }
 ```
 
+### Apple Intelligence
+
+On iOS 26 and macOS 26, `FoundationModelsEngine` runs the agent on Apple's on-device model. There is nothing to download and nothing leaves the device:
+
+```swift
+if FoundationModelsEngine.isAvailable {
+    await agent.run(task: "Search the shop for a blue mug and tell me the price",
+                    engine: FoundationModelsEngine())
+} else {
+    print(FoundationModelsEngine.unavailableReason ?? "")   // "Turn on Apple Intelligence in Settings…"
+}
+```
+
+Apple's model reads 4,096 tokens at a time, prompt and reply together. An engine like it conforms to `GepettoPromptLimitedEngine`: before each step the agent asks whether its prompt fits and, until it does, shows the model fewer page elements, less page text and fewer earlier steps.
+
 ## The panel
 
 ```swift
@@ -110,7 +125,7 @@ agent.respond(allow: true)             // answer an approval card
 agent.answer("The blue one")           // answer a question the agent asked
 ```
 
-When control comes back, the model is told how long the person had the page, whether it moved to a new address, which fields they filled (by label, never by value), what was resolved, and their note. Hand-over also happens by itself for captchas, verification codes and payment forms (`configuration.handOverBlockers`). JavaScript dialogs a page raises while the person drives are shown to them as native alerts.
+While the person drives, the header has a full-screen button, for a sign-in or a long form; handing back closes it. When control comes back, the model is told how long the person had the page, whether it moved to a new address, which fields they filled (by label, never by value), what was resolved, and their note. Hand-over also happens by itself for captchas, verification codes and payment forms (`configuration.handOverBlockers`). JavaScript dialogs a page raises while the person drives are shown to them as native alerts.
 
 ## Sensitive actions
 
@@ -210,6 +225,7 @@ let blockers = await engine.blockers()            // [.captcha], [.payment], …
 
 - iOS 16+, macOS 13+
 - Swift 5.9, Xcode 15+. Liquid Glass needs the iOS 26 / macOS 26 SDK; earlier systems get a material.
+- `FoundationModelsEngine` needs iOS 26 or macOS 26 with Apple Intelligence turned on.
 
 ## Development
 
@@ -217,7 +233,7 @@ let blockers = await engine.blockers()            // [.captcha], [.payment], …
 swift test
 ```
 
-131 tests, including ones that load real HTML into a `WKWebView` and drive it by index: secrets that must not leak, consent banners, captchas that are and are not on screen, typing without a keyboard, shadow DOM, frames and SVG.
+143 tests, including ones that load real HTML into a `WKWebView` and drive it by index: secrets that must not leak, consent banners, captchas that are and are not on screen, typing without a keyboard, shadow DOM, frames and SVG. One has Apple Intelligence search a local shop end to end; it is skipped where Apple Intelligence is off.
 
 ## License
 
