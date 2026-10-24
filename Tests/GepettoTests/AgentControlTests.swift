@@ -211,6 +211,10 @@ final class AgentControlTests: XCTestCase {
         XCTAssertFalse(AgentLoopHeuristics.taskAsksForPageAction("What is the weather in Paris today?"))
         // Whole words only: "address" is not "add", "registered" is not "register".
         XCTAssertFalse(AgentLoopHeuristics.taskAsksForPageAction("Find the address of the registered office."))
+        // Verbs count only where a clause starts: a noun "post" or a URL path does not.
+        XCTAssertFalse(AgentLoopHeuristics.taskAsksForPageAction("Go to news.ycombinator.com/show and tell me the title of the top Show HN post."))
+        XCTAssertTrue(AgentLoopHeuristics.taskAsksForPageAction("Open https://httpbin.org/forms/post and order a large pizza for Jared, then submit the order."))
+        XCTAssertTrue(AgentLoopHeuristics.taskAsksForPageAction("I want to book a table for two tonight."))
     }
 }
 

@@ -254,7 +254,7 @@ extension BrowserAgent {
                     notes.append("\(shown.compactDescription) is \(category == .account ? "an" : "a") \(category.title.lowercased()) action, which this agent is not allowed to perform. Finish with done and explain what the user should do themselves.")
                     continue
                 case .askFirst:
-                    let summary = decision.action.humanLabel(in: snap)
+                    let summary = approvalSummary(for: decision.action, in: snap, focusedRef: focusedRef)
                     let response = await waitForUser(.confirm(action: shown, summary: summary, category: category))
                     switch response {
                     case .confirmed(true):
@@ -728,6 +728,23 @@ extension BrowserAgent {
         }
     }
 
+    /// What the approval card says. Typing with Enter and pressing Enter
+    /// name the button they would press, which is what the person decides on.
+    func approvalSummary(for action: AgentAction, in snapshot: PageSnapshot, focusedRef: String?) -> String {
+        let field: PageSnapshot.Element?
+        switch action {
+        case .type(let i, _, let submit) where submit: field = snapshot.element(at: i)
+        case .press(let key) where key == "Enter": field = focusedRef.flatMap { ref in snapshot.elements.first { $0.ref == ref } }
+        default: field = nil
+        }
+        if let field {
+            let button = field.submitLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? snapshot.elements.first { $0.index > field.index && $0.kind == "button" }?.text
+            if let button, !button.isEmpty { return "Submitting the form with “\(button)”" }
+        }
+        return action.humanLabel(in: snapshot)
+    }
+
     /// What submitting field `e` would do: the label of its form's submit
     /// control when the page reports one, otherwise the first few buttons
     /// after the field (composers that have no form).
@@ -964,10 +981,15 @@ enum AgentLoopHeuristics {
                               "delete", "remove", "fill", "apply", "click", "tap", "press", "select",
                               "choose", "enter", "type", "log in", "sign in", "upload", "rsvp", "vote", "like"]
 
-    /// True when the task asks the agent to act on a page rather than read it.
+    /// True when the task asks the agent to act on a page rather than read
+    /// it. A verb only counts where it starts the task or a clause ("add
+    /// it", "and order", "then submit", "to book"), so nouns such as "the
+    /// top Show HN post" or a URL path like /forms/post do not.
     static func taskAsksForPageAction(_ task: String) -> Bool {
-        let words = " " + task.lowercased().replacingOccurrences(of: #"[^a-z ]"#, with: " ", options: .regularExpression) + " "
-        return actionVerbs.contains { words.contains(" \($0) ") }
+        let text = task.lowercased()
+        let verbs = actionVerbs.map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "|")
+        let pattern = #"(?:^|[,.;:!?]\s*|\b(?:and|then|to|please|also|now)\s+)(?:"# + verbs + #")\b"#
+        return text.range(of: pattern, options: .regularExpression) != nil
     }
 }
 
