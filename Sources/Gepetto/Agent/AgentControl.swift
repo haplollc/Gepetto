@@ -168,6 +168,9 @@ public struct AgentStep: Sendable, Identifiable, Equatable {
     public var duration: TimeInterval
     /// Page URL after the step.
     public var url: String
+    /// The raw model reply this step was parsed from (nil for steps the
+    /// agent took on its own, such as the first navigation).
+    public var modelReply: String?
 
     public init(id: UUID = UUID(), number: Int, action: AgentAction, label: String, thought: String?,
                 outcome: String = "", succeeded: Bool = true, startedAt: Date = Date(),
@@ -208,7 +211,7 @@ public struct HandBackSummary: Sendable, Equatable {
         let cleared = blockersBefore.filter { !blockersAfter.contains($0) }
         if !cleared.isEmpty { lines.append("Resolved: \(cleared.map(\.rawValue).joined(separator: ", ")).") }
         if let note, !note.isEmpty { lines.append("The user says: \(note)") }
-        lines.append("Continue the task from the current page. Do not redo what the user did.")
+        lines.append("Continue the task from the current page. Do not redo what the user did. The page may be scrolled: SCROLL under CURRENT PAGE says how much is above and below you.")
         return lines.joined(separator: " ")
     }
 }

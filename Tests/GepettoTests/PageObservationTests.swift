@@ -26,6 +26,9 @@ final class PageObservationTests: XCTestCase {
         // WKWebView lays out (and reports geometry) only inside a window.
         window = NSWindow(contentRect: engine.webView.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = engine.webView
+        // Layout and hit-testing need an on-screen window; keep it invisible
+        // so the test run never flashes anything on the person's screen.
+        window.alphaValue = 0
         window.orderFront(nil)
         #endif
     }

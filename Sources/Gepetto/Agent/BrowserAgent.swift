@@ -301,6 +301,10 @@ public final class BrowserAgent: ObservableObject {
     /// What the model has learned so far (its own notes).
     @Published public internal(set) var memory: String?
 
+    /// The model's last raw reply, exactly as streamed. For logs and
+    /// debugging; the parsed decision is what the agent acts on.
+    @Published public internal(set) var lastModelReply: String?
+
     /// The page as last observed.
     @Published public internal(set) var snapshot: PageSnapshot?
 

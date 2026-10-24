@@ -117,6 +117,7 @@ extension BrowserAgent {
                 return
             }
             if stopRequested { finish(onEvent: onEvent, failure: "Stopped by the user."); return }
+            lastModelReply = raw
 
             let decision: AgentDecision
             switch AgentOutputParser.parse(raw, allowPlainAnswer: stepNumber > 1) {
@@ -308,7 +309,8 @@ extension BrowserAgent {
 
     private func beginStep(_ action: AgentAction, thought: String?, snapshot: PageSnapshot?) -> AgentStep {
         let label = action.humanLabel(in: snapshot)
-        let step = AgentStep(number: steps.count + 1, action: action, label: label, thought: thought)
+        var step = AgentStep(number: steps.count + 1, action: action, label: label, thought: thought)
+        step.modelReply = lastModelReply
         currentPhase = phase(for: action, in: snapshot)
         lastAction = action.name
         lastActionTarget = label
@@ -562,6 +564,7 @@ extension BrowserAgent {
 
         Rules:
         - Use only the indices listed under ELEMENTS. Never invent one. If the element you need is not listed, scroll.
+        - SCROLL "pages above" means content is above you: use scroll up or top to reach it; "pages below" means scroll down.
         - For search boxes use type with "submit":true.
         - Read VISIBLE TEXT before deciding; if it already answers the task, use done.
         - In done, only state facts you saw on a page. If something is missing, say so and set "success":false.
