@@ -170,25 +170,93 @@ public struct BrowserNavBar: View {
 
 // MARK: - WebView Representable
 
+/// Hosts the engine's one web view. A web view lives in one place at a
+/// time, so when a second host shows the page (the full-screen view during
+/// a takeover) it takes the web view, and the first host takes it back when
+/// it is the active one again. `isActive` says which host should have it.
 #if os(iOS)
+final class WebViewHost: UIView {
+    var webView: WKWebView?
+    var isActive = true
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil { attachIfActive() }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if let webView, webView.superview === self { webView.frame = bounds }
+    }
+
+    func attachIfActive() {
+        guard isActive, let webView, webView.superview !== self else { return }
+        webView.removeFromSuperview()
+        webView.frame = bounds
+        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(webView)
+    }
+}
+
 struct WebViewRepresentable: UIViewRepresentable {
     let webView: WKWebView
-    
-    func makeUIView(context: Context) -> WKWebView {
-        webView
+    var isActive: Bool = true
+
+    func makeUIView(context: Context) -> WebViewHost {
+        let host = WebViewHost()
+        host.webView = webView
+        host.isActive = isActive
+        host.attachIfActive()
+        return host
     }
-    
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    func updateUIView(_ host: WebViewHost, context: Context) {
+        host.webView = webView
+        host.isActive = isActive
+        host.attachIfActive()
+    }
 }
 #elseif os(macOS)
+final class WebViewHost: NSView {
+    var webView: WKWebView?
+    var isActive = true
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { attachIfActive() }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        if let webView, webView.superview === self { webView.frame = bounds }
+    }
+
+    func attachIfActive() {
+        guard isActive, let webView, webView.superview !== self else { return }
+        webView.removeFromSuperview()
+        webView.frame = bounds
+        webView.autoresizingMask = [.width, .height]
+        addSubview(webView)
+    }
+}
+
 struct WebViewRepresentable: NSViewRepresentable {
     let webView: WKWebView
-    
-    func makeNSView(context: Context) -> WKWebView {
-        webView
+    var isActive: Bool = true
+
+    func makeNSView(context: Context) -> WebViewHost {
+        let host = WebViewHost()
+        host.webView = webView
+        host.isActive = isActive
+        host.attachIfActive()
+        return host
     }
-    
-    func updateNSView(_ nsView: WKWebView, context: Context) {}
+
+    func updateNSView(_ host: WebViewHost, context: Context) {
+        host.webView = webView
+        host.isActive = isActive
+        host.attachIfActive()
+    }
 }
 #endif
 

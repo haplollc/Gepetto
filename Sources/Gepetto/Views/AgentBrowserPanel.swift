@@ -34,6 +34,19 @@ public struct AgentBrowserPanel: View {
 
     @State private var toast: (success: Bool, text: String)?
 
+    /// True for the copy of the panel shown full screen while the person is
+    /// in control; it offers to exit instead of to expand.
+    private var isFullScreen = false
+    private var onExitFullScreen: (() -> Void)?
+    @State private var showsFullScreen = false
+    /// True from opening the full-screen copy until it is fully gone. The
+    /// page lives in one place at a time, so this panel gives the web view
+    /// (and the page's dialogs) to the copy and takes them back after.
+    @State private var pageIsInFullScreen = false
+
+    /// This panel holds the live page now.
+    private var hostsPage: Bool { isFullScreen || !pageIsInFullScreen }
+
     public init(agent: BrowserAgent,
                 stageHeight: CGFloat? = nil,
                 showsHeader: Bool = true,
@@ -48,6 +61,18 @@ public struct AgentBrowserPanel: View {
         self.onCollapse = onCollapse
     }
 
+    /// The full-screen copy: the page fills the screen, no timeline.
+    private init(fullScreenOf agent: BrowserAgent, onExit: @escaping () -> Void) {
+        self.agent = agent
+        self.stageHeight = nil
+        self.showsHeader = true
+        self.showsTimeline = false
+        self.onClose = nil
+        self.onCollapse = nil
+        self.isFullScreen = true
+        self.onExitFullScreen = onExit
+    }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if showsHeader { header }
@@ -57,12 +82,33 @@ public struct AgentBrowserPanel: View {
         .agentGlass(in: RoundedRectangle(cornerRadius: AgentUI.radiusLarge, style: .continuous))
         .agentPanelShadow()
         .onChange(of: agent.controlState) { state in
+            // Full screen is for the person's turn; it closes when the agent
+            // has the page again or the run ends.
+            if showsFullScreen, !state.isHumanDriving { showsFullScreen = false }
             guard case .finished(let ok) = state else { return }
             withAnimation(.easeInOut(duration: 0.2)) { toast = (ok, ok ? "Finished" : agent.currentPhase.label) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                 withAnimation(.easeOut(duration: 0.2)) { toast = nil }
             }
         }
+        #if os(iOS)
+        .fullScreenCover(isPresented: $showsFullScreen, onDismiss: { pageIsInFullScreen = false }) {
+            fullScreenCopy
+        }
+        #else
+        .sheet(isPresented: $showsFullScreen, onDismiss: { pageIsInFullScreen = false }) {
+            fullScreenCopy.frame(minWidth: 820, minHeight: 680)
+        }
+        #endif
+    }
+
+    private var fullScreenCopy: some View {
+        AgentBrowserPanel(fullScreenOf: agent) { showsFullScreen = false }
+            .padding(.horizontal, 8)
+            .padding(.top, 4)
+            .padding(.bottom, 8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(AgentUI.screenBackground.ignoresSafeArea())
     }
 
     // MARK: Header
@@ -113,7 +159,18 @@ public struct AgentBrowserPanel: View {
             .agentGlass(in: Capsule())
             .padding(AgentUI.hitMargin)
             // Hand back lives on the bar at the bottom of the page, next to
-            // what the person is doing; the header only says who is driving.
+            // what the person is doing; the header says who is driving and
+            // lets the page fill the screen for a sign-in or a long form.
+            if isFullScreen {
+                GlassIconButton(symbol: "arrow.down.right.and.arrow.up.left", label: "Exit full screen") {
+                    onExitFullScreen?()
+                }
+            } else {
+                GlassIconButton(symbol: "arrow.up.left.and.arrow.down.right", label: "Full screen") {
+                    pageIsInFullScreen = true
+                    showsFullScreen = true
+                }
+            }
         case .waitingForUser:
             GlassIconButton(symbol: "hand.raised", label: "Take over") { agent.takeOver() }
             GlassIconButton(symbol: "xmark", label: "Stop") { agent.stop() }
@@ -144,12 +201,12 @@ public struct AgentBrowserPanel: View {
         ZStack(alignment: .bottom) {
             if let engine = agent.executor?.engine {
                 ZStack(alignment: .topLeading) {
-                    WebViewRepresentable(webView: engine.webView)
+                    WebViewRepresentable(webView: engine.webView, isActive: hostsPage)
                     InteractionBlocker(active: !engine.acceptsUserInput)
                     AgentCursorView(target: agent.activeTargetFrame)
                     LoadingBar(engine: engine)
                 }
-                .modifier(PageDialogPresenter(engine: engine))
+                .modifier(PageDialogPresenter(engine: engine, enabled: hostsPage))
             } else {
                 startingState
             }
@@ -277,6 +334,8 @@ private struct LivePageHeading: View {
 /// `BrowserEngine.respond(to:ok:text:)`.
 private struct PageDialogPresenter: ViewModifier {
     @ObservedObject var engine: BrowserEngine
+    /// Only the panel holding the page presents its dialogs.
+    var enabled: Bool = true
     @State private var promptText = ""
     @State private var respondedID: UUID?
 
@@ -311,7 +370,7 @@ private struct PageDialogPresenter: ViewModifier {
     /// as a cancel, once any button action has had its turn.
     private var isPresented: Binding<Bool> {
         Binding(
-            get: { engine.pendingDialog != nil },
+            get: { enabled && engine.pendingDialog != nil },
             set: { shown in
                 guard !shown, let id = engine.pendingDialog?.id else { return }
                 DispatchQueue.main.async {

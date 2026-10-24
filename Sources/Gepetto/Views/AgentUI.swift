@@ -12,6 +12,11 @@
 //
 
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
 enum AgentUI {
     /// Large floating surface: the panel.
@@ -25,6 +30,12 @@ enum AgentUI {
     static let radiusStage: CGFloat = 14
 
     static let hairline = Color.primary.opacity(0.08)
+    /// Behind the full-screen panel.
+    #if os(iOS)
+    static let screenBackground = Color(uiColor: .systemBackground)
+    #else
+    static let screenBackground = Color(nsColor: .windowBackgroundColor)
+    #endif
     static let inset = Color.primary.opacity(0.05)
     static let insetSelected = Color.primary.opacity(0.09)
 
