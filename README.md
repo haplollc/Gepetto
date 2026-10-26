@@ -15,7 +15,12 @@
   <img src="https://img.shields.io/badge/macOS-13+-000000?logo=apple&logoColor=white" alt="macOS 13+" />
   <img src="https://img.shields.io/badge/SPM-compatible-brightgreen" alt="Swift Package Manager" />
   <img src="https://img.shields.io/badge/License-MIT-blue" alt="MIT License" />
-  <a href="https://buymeacoffee.com/jcbuilds"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee" /></a>
+</p>
+
+<p align="center">
+  <a href="https://buymeacoffee.com/jcbuilds"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" width="200"></a>
+  <br>
+  <sub>If Gepetto is useful to you, a coffee keeps it going.</sub>
 </p>
 
 ---
