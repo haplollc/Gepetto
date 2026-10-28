@@ -1,12 +1,8 @@
+# Gepetto
+A browser agent for iOS and macOS that a person can take over at any time, driving a real WKWebView with small on-device models and a native SwiftUI panel.
+
 <p align="center">
   <img src="assets/banner.gif" width="864" alt="Three iPhones running Gepetto: researching on GitHub, a person taking over a store login, and an approval card before a blog post is published">
-</p>
-
-<h1 align="center">Gepetto</h1>
-
-<p align="center">
-  A browser agent for iOS and macOS that a person can take over at any time.<br />
-  A real WKWebView, any model down to small on-device ones, and a native SwiftUI panel.
 </p>
 
 <p align="center">
@@ -14,7 +10,8 @@
   <img src="https://img.shields.io/badge/iOS-16+-000000?logo=apple&logoColor=white" alt="iOS 16+" />
   <img src="https://img.shields.io/badge/macOS-13+-000000?logo=apple&logoColor=white" alt="macOS 13+" />
   <img src="https://img.shields.io/badge/SPM-compatible-brightgreen" alt="Swift Package Manager" />
-  <img src="https://img.shields.io/badge/License-MIT-blue" alt="MIT License" />
+  [![GitHub stars](https://img.shields.io/github/stars/haplollc/Gepetto?style=flat)](https://github.com/haplollc/Gepetto/stargazers)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 </p>
 
 <p align="center">
@@ -23,11 +20,25 @@
   <sub>If Gepetto is useful to you, a coffee keeps it going.</sub>
 </p>
 
----
+**Install**
 
 ```swift
+dependencies: [
+    .package(url: "https://github.com/haplollc/Gepetto", from: "2.0.0")
+]
+```
+
+**Try it**
+
+```swift
+let agent = BrowserAgent()
+
 await agent.run(task: "What is the top story on Hacker News?", engine: model)
 ```
+
+If this is useful, a star helps others find it.
+
+---
 
 Gepetto drives a real `WKWebView` from one sentence. Each step the model reads the page as a short numbered list of what it can touch, picks one action as JSON, and the agent does it, checks what changed and tells the model. The person watching sees every click land, can pause or take the page over at any moment to sign in, solve a captcha or pay, hands it back with a note, and approves anything that buys, sends or deletes before it happens.
 
@@ -246,3 +257,19 @@ swift test
 Gepetto is available under the [MIT license](LICENSE).
 
 Made by [Haplo LLC](https://haploapp.com).
+---
+
+## More from Haplo
+
+More open source from [Haplo](https://github.com/haplollc), built by the same solo developer:
+
+- [ThinkingOrbs](https://github.com/haplollc/ThinkingOrbs): dotted, honestly-3D loading indicators for AI and agent interfaces in SwiftUI. Nine hand-tuned designs, two tuned sizes.
+- [Minted](https://github.com/haplollc/Minted): turn any SVG into a physically-lit 3D gold medallion for SwiftUI.
+- [Vesalius](https://github.com/haplollc/Vesalius): a map of your codebase for Claude Code, an on-device code graph with an MCP server, a CLI, a Mac app and a VS Code extension.
+- [MuscleMapKit](https://github.com/haplollc/MuscleMapKit): interactive 3D muscle map for iOS. Shade muscles by how hard they were worked, spin the body, tap a group.
+- [ProcessingField](https://github.com/haplollc/ProcessingField): a SwiftUI progress field, a grid of marks whose sizes describe one soft shape that drifts, folds and breathes while your app is busy.
+- [ClayGlobe](https://github.com/haplollc/ClayGlobe): a claymorphic 3D globe for SwiftUI that plants a waving flag on every country you visit.
+- [Mirage](https://github.com/haplollc/Mirage): one-stop on-device diffusion image-generation engine for iOS / macOS / visionOS.
+- [SiriGlass](https://github.com/haplollc/SiriGlass): the Siri drop from iOS 27, for SwiftUI. Liquid Glass that pours out of the Dynamic Island and lights up with your voice.
+- [Scrubbers](https://github.com/haplollc/Scrubbers): twelve sliders you will want to touch, for SwiftUI. One view, one enum.
+- [KoiPond](https://github.com/haplollc/KoiPond): a living koi pond for SwiftUI. Koi glide over any view, lily pads drift on top, and a Metal shader ripples and refracts it all.
