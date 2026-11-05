@@ -33,7 +33,9 @@ dependencies: [
 ```swift
 let agent = BrowserAgent()
 
-await agent.run(task: "What is the top story on Hacker News?", engine: model)
+await agent.run(task: "What is the top story on Hacker News?", engine: model) { event in
+    if case .complete(let answer) = event { print(answer) }
+}
 ```
 
 If this is useful, a star helps others find it.
@@ -108,7 +110,9 @@ On iOS 26 and macOS 26, `FoundationModelsEngine` runs the agent on Apple's on-de
 ```swift
 if FoundationModelsEngine.isAvailable {
     await agent.run(task: "Search the shop for a blue mug and tell me the price",
-                    engine: FoundationModelsEngine())
+                    engine: FoundationModelsEngine()) { event in
+        if case .complete(let answer) = event { print(answer) }
+    }
 } else {
     print(FoundationModelsEngine.unavailableReason ?? "")   // "Turn on Apple Intelligence in Settings…"
 }
