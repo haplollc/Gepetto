@@ -24,7 +24,7 @@ A browser agent for iOS and macOS that a person can take over at any time, drivi
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/haplollc/Gepetto", from: "2.0.0")
+    .package(url: "https://github.com/haplollc/Gepetto", branch: "main")
 ]
 ```
 
@@ -65,7 +65,7 @@ Or in `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/haplollc/Gepetto", from: "2.0.0")
+    .package(url: "https://github.com/haplollc/Gepetto", branch: "main")
 ]
 ```
 
