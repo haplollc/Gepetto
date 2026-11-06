@@ -10,8 +10,8 @@ A browser agent for iOS and macOS that a person can take over at any time, drivi
   <img src="https://img.shields.io/badge/iOS-16+-000000?logo=apple&logoColor=white" alt="iOS 16+" />
   <img src="https://img.shields.io/badge/macOS-13+-000000?logo=apple&logoColor=white" alt="macOS 13+" />
   <img src="https://img.shields.io/badge/SPM-compatible-brightgreen" alt="Swift Package Manager" />
-  [![GitHub stars](https://img.shields.io/github/stars/haplollc/Gepetto?style=flat)](https://github.com/haplollc/Gepetto/stargazers)
-  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+  <a href="https://github.com/haplollc/Gepetto/stargazers"><img src="https://img.shields.io/github/stars/haplollc/Gepetto?style=flat" alt="GitHub stars" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
 </p>
 
 <p align="center">
@@ -261,6 +261,7 @@ swift test
 Gepetto is available under the [MIT license](LICENSE).
 
 Made by [Haplo LLC](https://haploapp.com).
+
 ---
 
 ## More from Haplo
