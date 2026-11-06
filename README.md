@@ -127,9 +127,9 @@ struct ChatScreen: View {
     @StateObject var agent = BrowserAgent()
 
     var body: some View {
-        AgentBrowserPanel(agent: agent, stageHeight: 380) {
+        AgentBrowserPanel(agent: agent, stageHeight: 380, onClose: {
             agent.shutdown()
-        }
+        })
     }
 }
 ```
